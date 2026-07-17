@@ -1,0 +1,10 @@
+wrong_answers.db
+wrong_answers_v2.db
+wrong_answers_v3.db
+wrong_answers_v4.db
+wrong_answers
+.streamlit/secrets.toml
+secrets.toml
+__pycache__/
+*.pyc
+.env
