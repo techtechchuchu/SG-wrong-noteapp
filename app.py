@@ -1051,7 +1051,7 @@ def show_admin():
 
             with st.expander("🧩 변형문제 필요 학생", expanded=False):
                 variant_df = display_df[
-                    display_df["비고"].fillna("").str.contains("변형문제", case=False, na=False)
+                    display_df["비고"].fillna("").str.contains("변형", case=False, na=False)
                 ].copy()
 
                 if variant_df.empty:
