@@ -4,11 +4,9 @@ from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
-from textwrap import dedent
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
 from supabase import Client, create_client
 
 
@@ -367,57 +365,49 @@ def show_banner():
     if BANNER_PATH.exists():
         st.image(str(BANNER_PATH), width=280)
 
-    banner_html = dedent(
-        """
-        <div class="sg-notice-card">
-            <div class="sg-notice-title">
-                <span>📣</span>
-                <span>계정 복구 안내</span>
-            </div>
+    banner_html = """
+<div class="sg-notice-card">
+<div class="sg-notice-title">
+<span>📣</span>
+<span>계정 복구 안내</span>
+</div>
 
-            <div class="sg-notice-intro">
-                학생 계정 복구는 완료되었습니다.
-                기존에 사용하던 학생 이름과 아래 임시 비밀번호로 로그인해주세요.
-            </div>
+<div class="sg-notice-intro">
+학생 계정 복구는 완료되었습니다.<br>
+기존에 사용하던 학생 이름과 아래 임시 비밀번호로 로그인해주세요.
+</div>
 
-            <div class="sg-temp-password">
-                <span class="sg-lock">🔐</span>
-                <span class="sg-temp-label">임시 비밀번호</span>
-                <span class="sg-temp-value">sg2026</span>
-            </div>
+<div class="sg-temp-password">
+<span class="sg-lock">🔐</span>
+<span class="sg-temp-label">임시 비밀번호</span>
+<span class="sg-temp-value">sg2026</span>
+</div>
 
-            <div class="sg-action-box">
-                <div class="sg-action-title">로그인 후 꼭 진행해주세요</div>
+<div class="sg-action-box">
+<div class="sg-action-title">로그인 후 꼭 진행해주세요</div>
 
-                <div class="sg-action-item">
-                    <span class="sg-action-number">1</span>
-                    <span>
-                        임시 비밀번호를
-                        <strong>본인이 사용할 새 비밀번호로 변경</strong>
-                    </span>
-                </div>
+<div class="sg-action-item">
+<span class="sg-action-number">1</span>
+<span>임시 비밀번호를 <strong>본인이 사용할 새 비밀번호로 변경</strong></span>
+</div>
 
-                <div class="sg-action-item">
-                    <span class="sg-action-number">2</span>
-                    <span>
-                        주말에 작성했던
-                        <strong>기존 오답번호를 다시 입력</strong>
-                    </span>
-                </div>
-            </div>
+<div class="sg-action-item">
+<span class="sg-action-number">2</span>
+<span>주말에 작성했던 <strong>기존 오답번호를 다시 입력</strong></span>
+</div>
+</div>
 
-            <div class="sg-notice-foot">
-                현재 기존 오답번호 목록은 초기화된 상태입니다.
-                본인이 작성했던 개수만큼 빠짐없이 다시 입력해주시기 바랍니다.
-                이용에 불편을 드려 죄송합니다.
-            </div>
+<div class="sg-notice-foot">
+현재 기존 오답번호 목록은 초기화된 상태입니다.<br>
+본인이 작성했던 개수만큼 빠짐없이 다시 입력해주시기 바랍니다.<br>
+이용에 불편을 드려 죄송합니다.
+</div>
 
-            <div class="sg-signature">- SG 고등관 조교 -</div>
-        </div>
-        """
-    ).strip()
+<div class="sg-signature">- SG 고등관 조교 -</div>
+</div>
+""".strip()
 
-    st.markdown(banner_html, unsafe_allow_html=True)
+    st.html(banner_html)
 
 
 # ---------------------- Supabase 연결 ----------------------
@@ -955,7 +945,7 @@ def show_role_select():
             ℹ️ 비밀번호를 분실한 경우 학원 관리자에게 문의해주세요.
         </div>
         <div class="sg-footer">
-            © SG 고등관 오답노트 | 안전한 학습 관리 시스템
+            Made by techtechchu
         </div>
         """,
         unsafe_allow_html=True
