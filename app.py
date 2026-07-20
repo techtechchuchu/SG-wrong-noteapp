@@ -1,4 +1,5 @@
 import io
+import re
 import hashlib
 from collections import Counter
 from datetime import datetime
@@ -596,21 +597,147 @@ def get_admin_password_status() -> pd.DataFrame:
 
 
 # ---------------------- 오답 저장/조회 ----------------------
+def parse_problem_numbers(value: str) -> list[str]:
+    """
+    쉼표, 띄어쓰기, 줄바꿈이 섞여 있어도 숫자만 순서대로 추출합니다.
+    예: '371, 499, 486, 587 961' → ['371', '499', '486', '587', '961']
+    """
+    numbers = re.findall(r"\d+", str(value or ""))
+    return list(dict.fromkeys(numbers))
+
+
+def format_problem_numbers(numbers: list[str]) -> str:
+    return ", ".join(numbers)
+
+
+def get_existing_problem_numbers(username: str, book: str) -> set[str]:
+    rows = fetch_all_rows(
+        "wrong_answers",
+        "problem",
+        filters=[
+            ("username", "eq", username),
+            ("unit", "eq", book),
+        ],
+    )
+
+    existing: set[str] = set()
+
+    for row in rows:
+        existing.update(parse_problem_numbers(row.get("problem", "")))
+
+    return existing
+
+
 def add_wrong_answer(
     username: str,
     book: str,
     problem_number: str,
     note: str
-):
+) -> dict:
+    submitted_numbers = parse_problem_numbers(problem_number)
+
+    if not submitted_numbers:
+        return {
+            "saved": False,
+            "new_numbers": [],
+            "duplicate_numbers": [],
+            "message": "저장할 문제번호가 없습니다.",
+        }
+
+    existing_numbers = get_existing_problem_numbers(username, book)
+
+    new_numbers = [
+        number
+        for number in submitted_numbers
+        if number not in existing_numbers
+    ]
+    duplicate_numbers = [
+        number
+        for number in submitted_numbers
+        if number in existing_numbers
+    ]
+
+    if not new_numbers:
+        return {
+            "saved": False,
+            "new_numbers": [],
+            "duplicate_numbers": duplicate_numbers,
+            "message": "입력한 문제번호가 모두 이미 저장되어 있습니다.",
+        }
+
     supabase.table("wrong_answers").insert(
         {
             "username": username,
             "unit": book,
-            "problem": problem_number,
+            "problem": format_problem_numbers(new_numbers),
             "memo": note,
-            "created_at": now_kst_iso()
+            "created_at": now_kst_iso(),
         }
     ).execute()
+
+    return {
+        "saved": True,
+        "new_numbers": new_numbers,
+        "duplicate_numbers": duplicate_numbers,
+        "message": "새 문제번호만 저장했습니다.",
+    }
+
+
+def cleanup_duplicate_wrong_answers() -> dict:
+    """
+    학생·교재별 작성 순서대로 확인하여 이미 저장된 번호는 뒤 기록에서 제거합니다.
+    완전히 같은 중복 행은 삭제합니다.
+    """
+    rows = fetch_all_rows(
+        "wrong_answers",
+        "id,username,unit,problem,created_at",
+        order_column="id",
+        desc=False,
+    )
+
+    seen_by_group: dict[tuple[str, str], set[str]] = {}
+    updated_count = 0
+    deleted_count = 0
+
+    for row in rows:
+        row_id = row.get("id")
+        username = str(row.get("username", ""))
+        unit = str(row.get("unit", ""))
+        group_key = (username, unit)
+
+        seen = seen_by_group.setdefault(group_key, set())
+        numbers = parse_problem_numbers(row.get("problem", ""))
+
+        new_numbers = [number for number in numbers if number not in seen]
+
+        if not new_numbers:
+            (
+                supabase.table("wrong_answers")
+                .delete()
+                .eq("id", row_id)
+                .execute()
+            )
+            deleted_count += 1
+            continue
+
+        normalized_problem = format_problem_numbers(new_numbers)
+        original_problem = str(row.get("problem", "")).strip()
+
+        if normalized_problem != original_problem:
+            (
+                supabase.table("wrong_answers")
+                .update({"problem": normalized_problem})
+                .eq("id", row_id)
+                .execute()
+            )
+            updated_count += 1
+
+        seen.update(new_numbers)
+
+    return {
+        "updated": updated_count,
+        "deleted": deleted_count,
+    }
 
 
 def get_my_wrong_answers(username: str) -> pd.DataFrame:
@@ -877,6 +1004,12 @@ def restore_users_from_excel(
 
 # ---------------------- 초기화 ----------------------
 verify_supabase_connection()
+
+try:
+    cleanup_duplicate_wrong_answers()
+except Exception as cleanup_error:
+    st.warning(f"기존 중복 오답 정리 중 오류가 발생했습니다: {cleanup_error}")
+
 apply_global_style()
 
 
@@ -1041,14 +1174,27 @@ def show_student():
             if problem_number.strip() == "":
                 st.warning("문제 번호를 입력해주세요.")
             else:
-                add_wrong_answer(
+                result = add_wrong_answer(
                     st.session_state.student_user,
                     book,
                     problem_number.strip(),
                     note.strip()
                 )
-                st.success("오답이 저장되었습니다.")
-                st.rerun()
+
+                if result["saved"]:
+                    saved_text = ", ".join(result["new_numbers"])
+                    st.success(f"새 문제번호 {saved_text}이(가) 저장되었습니다.")
+
+                    if result["duplicate_numbers"]:
+                        duplicate_text = ", ".join(result["duplicate_numbers"])
+                        st.info(
+                            f"이미 저장된 문제번호 {duplicate_text}은(는) "
+                            "중복 저장하지 않았습니다."
+                        )
+
+                    st.rerun()
+                else:
+                    st.warning(result["message"])
 
         st.divider()
 
@@ -1215,11 +1361,16 @@ def show_admin():
 
             with st.expander("🧩 변형문제 필요 학생", expanded=False):
                 variant_df = display_df[
-                    display_df["비고"].fillna("").str.contains("변형문제", case=False, na=False)
+                    display_df["비고"].fillna("").str.contains(
+                        "변형",
+                        case=False,
+                        na=False,
+                        regex=False
+                    )
                 ].copy()
 
                 if variant_df.empty:
-                    st.info("현재 필터 기준에서 비고에 '변형문제'가 적힌 기록이 없습니다.")
+                    st.info("현재 필터 기준에서 비고에 '변형'이 포함된 기록이 없습니다.")
                 else:
                     st.write(f"변형문제 필요 기록: **{len(variant_df)}건**")
 
