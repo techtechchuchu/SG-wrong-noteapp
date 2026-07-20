@@ -4,6 +4,7 @@ from collections import Counter
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from pathlib import Path
+from textwrap import dedent
 
 import pandas as pd
 import streamlit as st
@@ -166,6 +167,195 @@ def apply_global_style():
             color: #8791a2;
             font-size: 14px;
         }
+
+        .sg-notice-card {
+            box-sizing: border-box;
+            width: 100%;
+            margin: 16px 0 24px 0;
+            padding: 24px 26px;
+            border: 1px solid #ead5cf;
+            border-left: 6px solid #a62c20;
+            border-radius: 16px;
+            background: linear-gradient(135deg, #fffdfa 0%, #fff7f3 100%);
+            color: #252b35;
+            line-height: 1.72;
+            box-shadow: 0 10px 28px rgba(87, 49, 38, 0.08);
+            overflow: visible;
+        }
+
+        .sg-notice-title {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 14px;
+            color: #8f241b;
+            font-size: 23px;
+            font-weight: 900;
+            letter-spacing: -0.5px;
+        }
+
+        .sg-notice-intro,
+        .sg-notice-foot {
+            font-size: 16px;
+            word-break: keep-all;
+            overflow-wrap: anywhere;
+        }
+
+        .sg-temp-password {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin: 18px 0;
+            padding: 14px 17px;
+            border: 1px solid #ead8d2;
+            border-radius: 12px;
+            background: #ffffff;
+        }
+
+        .sg-lock {
+            flex: 0 0 auto;
+            font-size: 21px;
+        }
+
+        .sg-temp-label {
+            flex: 0 1 auto;
+            color: #364152;
+            font-size: 16px;
+            font-weight: 800;
+            white-space: nowrap;
+        }
+
+        .sg-temp-value {
+            flex: 0 0 auto;
+            padding: 5px 12px;
+            border-radius: 9px;
+            background: #fff0e8;
+            color: #b3261e;
+            font-size: 21px;
+            font-weight: 900;
+        }
+
+        .sg-action-box {
+            margin-top: 16px;
+            padding: 16px 18px;
+            border: 1px solid #cfe3f6;
+            border-radius: 12px;
+            background: #eef7ff;
+        }
+
+        .sg-action-title {
+            margin-bottom: 10px;
+            color: #174b87;
+            font-size: 17px;
+            font-weight: 850;
+        }
+
+        .sg-action-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            margin: 8px 0;
+            font-size: 16px;
+            word-break: keep-all;
+            overflow-wrap: anywhere;
+        }
+
+        .sg-action-item strong {
+            color: #174b87;
+        }
+
+        .sg-action-number {
+            display: inline-flex;
+            flex: 0 0 24px;
+            width: 24px;
+            height: 24px;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            background: #174b87;
+            color: #ffffff;
+            font-size: 13px;
+            font-weight: 800;
+            line-height: 1;
+        }
+
+        .sg-notice-foot {
+            margin-top: 16px;
+            color: #5d6470;
+            font-size: 15px;
+        }
+
+        .sg-signature {
+            margin-top: 18px;
+            text-align: center;
+            color: #303846;
+            font-size: 16px;
+            font-weight: 800;
+        }
+
+        @media (max-width: 640px) {
+            .block-container {
+                padding-left: 1rem;
+                padding-right: 1rem;
+                padding-top: 1rem;
+            }
+
+            .sg-notice-card {
+                margin-top: 10px;
+                padding: 18px 16px;
+                border-left-width: 5px;
+                border-radius: 14px;
+            }
+
+            .sg-notice-title {
+                font-size: 20px;
+            }
+
+            .sg-notice-intro,
+            .sg-action-item {
+                font-size: 15px;
+                line-height: 1.65;
+            }
+
+            .sg-temp-password {
+                display: grid;
+                grid-template-columns: auto 1fr;
+                gap: 8px 10px;
+                padding: 13px 14px;
+            }
+
+            .sg-temp-label {
+                white-space: normal;
+            }
+
+            .sg-temp-value {
+                grid-column: 1 / -1;
+                justify-self: stretch;
+                text-align: center;
+                font-size: 20px;
+            }
+
+            .sg-action-box {
+                padding: 14px;
+            }
+
+            .sg-action-title {
+                font-size: 16px;
+            }
+
+            .sg-notice-foot {
+                font-size: 14px;
+            }
+
+            .sg-role-title {
+                font-size: 1.7rem;
+            }
+
+            div[data-testid="stButton"] > button {
+                min-height: 4.25rem;
+                font-size: 0.95rem;
+            }
+        }
         </style>
         """,
         unsafe_allow_html=True
@@ -175,75 +365,59 @@ def apply_global_style():
 # ---------------------- 배너 ----------------------
 def show_banner():
     if BANNER_PATH.exists():
-        st.image(str(BANNER_PATH), width=330)
+        st.image(str(BANNER_PATH), width=280)
 
-    banner_html = """
-    <div style="
-        box-sizing:border-box;
-        width:100%;
-        margin:18px 0 26px 0;
-        padding:28px 30px;
-        border:1px solid #ead5cf;
-        border-left:6px solid #a62c20;
-        border-radius:16px;
-        background:linear-gradient(135deg,#fffdfa 0%,#fff7f3 100%);
-        color:#252b35;
-        font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans KR',sans-serif;
-        line-height:1.78;
-        box-shadow:0 10px 28px rgba(87,49,38,0.08);
-    ">
-        <div style="display:flex; align-items:center; gap:10px; font-size:24px; font-weight:900; color:#8f241b; margin-bottom:18px; letter-spacing:-0.6px;">
-            <span>📣</span><span>시스템 점검 및 계정 복구 안내</span>
-        </div>
-
-        <div style="font-size:16px; word-break:keep-all;">
-            현재 SG 고등관 오답노트 앱의 안정적인 운영을 위해 시스템 점검과 데이터 백업 기능 개선 작업을 진행하고 있습니다.
-            기존 계정 백업 과정에서 일부 데이터가 초기화되는 문제가 발생하여 학생 계정 복구를 완료하였습니다.
-        </div>
-
-        <div style="display:flex; align-items:center; gap:14px; margin:20px 0 22px 0; padding:15px 18px; border-radius:12px; background:#ffffff; border:1px solid #ead8d2;">
-            <span style="font-size:22px;">🔐</span>
-            <span style="font-size:16px; font-weight:800; color:#364152;">임시 비밀번호</span>
-            <span style="padding:5px 12px; border-radius:9px; background:#fff0e8; color:#b3261e; font-size:21px; font-weight:900; letter-spacing:0.4px;">sg2026</span>
-        </div>
-
-        <div style="border-top:1px dashed #dfd8d3; padding-top:18px; margin-top:4px;">
-            <div style="font-size:18px; font-weight:850; color:#174b87; margin-bottom:6px;">👤 로그인 안내</div>
-            <div style="font-size:16px; word-break:keep-all;">
-                기존에 사용하던 학생 이름과 위 임시 비밀번호로 로그인해주세요.
-                로그인 후에는 <b style="color:#174b87;">주말에 작성했던 오답번호를 본인의 기존 작성 개수만큼 다시 입력</b>해주시기 바랍니다.
+    banner_html = dedent(
+        """
+        <div class="sg-notice-card">
+            <div class="sg-notice-title">
+                <span>📣</span>
+                <span>계정 복구 안내</span>
             </div>
-        </div>
 
-        <div style="border-top:1px dashed #dfd8d3; padding-top:18px; margin-top:18px;">
-            <div style="font-size:18px; font-weight:850; color:#18713b; margin-bottom:6px;">🛡️ 계정 복구 및 비밀번호 변경 안내</div>
-            <div style="font-size:16px; word-break:keep-all;">
-                계정 복구는 완료되었으나 현재 오답번호 목록은 모두 초기화된 상태입니다.
-                로그인 후에는 안전한 사용을 위해 <b style="color:#18713b;">임시 비밀번호를 본인이 사용할 비밀번호로 변경</b>해주시고,
-                주말에 작성했던 <b style="color:#18713b;">기존 오답노트 번호도 본인의 기존 작성 개수만큼 다시 입력</b>해주시기 바랍니다.
+            <div class="sg-notice-intro">
+                학생 계정 복구는 완료되었습니다.
+                기존에 사용하던 학생 이름과 아래 임시 비밀번호로 로그인해주세요.
             </div>
-        </div>
 
-        <div style="border-top:1px dashed #dfd8d3; padding-top:18px; margin-top:18px;">
-            <div style="font-size:18px; font-weight:850; color:#c45112; margin-bottom:6px;">⚠️ 안내 말씀</div>
-            <div style="font-size:16px; word-break:keep-all;">
-                앱 이용에 불편을 드려 진심으로 죄송합니다.
-                현재 초창기 버그와 오류를 보완하고 있으며, 앞으로는 데이터가 안전하게 보관될 수 있도록 백업 시스템을 개선하겠습니다.
-                보다 안정적이고 편리한 오답노트 앱으로 운영할 수 있도록 지속적으로 노력하겠습니다.
+            <div class="sg-temp-password">
+                <span class="sg-lock">🔐</span>
+                <span class="sg-temp-label">임시 비밀번호</span>
+                <span class="sg-temp-value">sg2026</span>
             </div>
-        </div>
 
-        <div style="margin-top:22px; text-align:center; font-size:16px; font-weight:800; color:#303846;">
-            - SG 고등관 조교 -
-        </div>
-    </div>
-    """
+            <div class="sg-action-box">
+                <div class="sg-action-title">로그인 후 꼭 진행해주세요</div>
 
-    components.html(
-        banner_html,
-        height=760,
-        scrolling=False
-    )
+                <div class="sg-action-item">
+                    <span class="sg-action-number">1</span>
+                    <span>
+                        임시 비밀번호를
+                        <strong>본인이 사용할 새 비밀번호로 변경</strong>
+                    </span>
+                </div>
+
+                <div class="sg-action-item">
+                    <span class="sg-action-number">2</span>
+                    <span>
+                        주말에 작성했던
+                        <strong>기존 오답번호를 다시 입력</strong>
+                    </span>
+                </div>
+            </div>
+
+            <div class="sg-notice-foot">
+                현재 기존 오답번호 목록은 초기화된 상태입니다.
+                본인이 작성했던 개수만큼 빠짐없이 다시 입력해주시기 바랍니다.
+                이용에 불편을 드려 죄송합니다.
+            </div>
+
+            <div class="sg-signature">- SG 고등관 조교 -</div>
+        </div>
+        """
+    ).strip()
+
+    st.markdown(banner_html, unsafe_allow_html=True)
 
 
 # ---------------------- Supabase 연결 ----------------------
@@ -1051,7 +1225,7 @@ def show_admin():
 
             with st.expander("🧩 변형문제 필요 학생", expanded=False):
                 variant_df = display_df[
-                    display_df["비고"].fillna("").str.contains("변형", case=False, na=False)
+                    display_df["비고"].fillna("").str.contains("변형문제", case=False, na=False)
                 ].copy()
 
                 if variant_df.empty:
