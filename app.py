@@ -768,6 +768,122 @@ def get_my_wrong_answers(username: str) -> pd.DataFrame:
     return df[["교재", "문제번호", "비고", "작성일시"]]
 
 
+def get_wrong_answer_edit_records() -> pd.DataFrame:
+    rows = fetch_all_rows(
+        "wrong_answers",
+        "id,username,unit,problem,memo,created_at",
+        order_column="id",
+        desc=True,
+    )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=["기록ID", "학생", "교재", "문제번호", "비고", "작성일시"]
+        )
+
+    return pd.DataFrame(
+        [
+            {
+                "기록ID": row.get("id"),
+                "학생": row.get("username", ""),
+                "교재": row.get("unit", ""),
+                "문제번호": row.get("problem", ""),
+                "비고": row.get("memo", ""),
+                "작성일시": row.get("created_at", ""),
+            }
+            for row in rows
+        ]
+    )
+
+
+def update_wrong_answer_book(record_id: int, new_book: str):
+    (
+        supabase.table("wrong_answers")
+        .update({"unit": new_book})
+        .eq("id", int(record_id))
+        .execute()
+    )
+    cleanup_duplicate_wrong_answers()
+
+
+def render_wrong_answer_book_editor(key_prefix: str):
+    records_df = get_wrong_answer_edit_records()
+
+    if records_df.empty:
+        st.info("수정할 오답 기록이 없습니다.")
+        return
+
+    students = ["전체"] + sorted(
+        records_df["학생"].dropna().astype(str).unique().tolist()
+    )
+
+    selected_student = st.selectbox(
+        "학생 선택",
+        students,
+        key=f"{key_prefix}_student",
+    )
+
+    filtered_df = records_df.copy()
+    if selected_student != "전체":
+        filtered_df = filtered_df[filtered_df["학생"] == selected_student]
+
+    option_map = {}
+    for _, row in filtered_df.iterrows():
+        date_text = str(row["작성일시"])[:10]
+        label = (
+            f"{row['학생']} | {date_text} | "
+            f"{row['교재']} | {row['문제번호']} | ID {row['기록ID']}"
+        )
+        option_map[label] = int(row["기록ID"])
+
+    selected_label = st.selectbox(
+        "수정할 기록",
+        list(option_map.keys()),
+        key=f"{key_prefix}_record",
+    )
+
+    record_id = option_map[selected_label]
+    selected_row = filtered_df[
+        filtered_df["기록ID"] == record_id
+    ].iloc[0]
+
+    current_book = str(selected_row["교재"])
+    current_index = BOOKS.index(current_book) if current_book in BOOKS else 0
+
+    st.caption(
+        f"현재 교재: {current_book} · 문제번호: {selected_row['문제번호']}"
+    )
+
+    new_book = st.selectbox(
+        "변경할 교재",
+        BOOKS,
+        index=current_index,
+        key=f"{key_prefix}_new_book",
+    )
+
+    confirm = st.checkbox(
+        "선택한 기록의 교재를 변경합니다.",
+        key=f"{key_prefix}_confirm",
+    )
+
+    if st.button(
+        "교재 수정",
+        key=f"{key_prefix}_button",
+        type="primary",
+    ):
+        if not confirm:
+            st.warning("수정 확인 항목에 체크해주세요.")
+        elif new_book == current_book:
+            st.info("현재 교재와 변경할 교재가 같습니다.")
+        else:
+            update_wrong_answer_book(record_id, new_book)
+            st.success(
+                f"{selected_row['학생']} 학생의 교재를 "
+                f"'{current_book}'에서 '{new_book}'으로 변경했습니다."
+            )
+            st.rerun()
+
+
 def get_all_wrong_answers() -> pd.DataFrame:
     answer_rows = fetch_all_rows(
         "wrong_answers",
@@ -1359,6 +1475,14 @@ def show_admin():
 
             st.divider()
 
+            with st.expander("✏️ 잘못 선택한 교재 수정", expanded=False):
+                st.info(
+                    "학생이 교재를 잘못 선택한 경우 올바른 교재로 변경할 수 있습니다."
+                )
+                render_wrong_answer_book_editor("teacher")
+
+            st.divider()
+
             with st.expander("🧩 변형문제 필요 학생", expanded=False):
                 variant_df = display_df[
                     display_df["비고"].fillna("").str.contains(
@@ -1643,6 +1767,12 @@ def show_superadmin():
                         st.success(f"{delete_student} 학생 계정이 삭제되었습니다.")
                         st.rerun()
 
+
+        st.divider()
+
+        with st.expander("✏️ 오답 기록 교재 수정", expanded=False):
+            st.info("학생이 잘못 선택한 교재를 수정할 수 있습니다.")
+            render_wrong_answer_book_editor("superadmin")
 
         st.divider()
 
