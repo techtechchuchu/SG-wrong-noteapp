@@ -1,5 +1,3 @@
-# trigger deploy 2026-07-24-2
-# trigger deploy 2026-07-24
 import io
 import re
 import hashlib
@@ -1506,13 +1504,8 @@ def show_role_select():
             ℹ️ 관리자 기능은 학원 관리자만 이용 가능합니다.<br>
             ℹ️ 비밀번호를 분실한 경우 학원 관리자에게 문의해주세요.
         </div>
-
         <div class="sg-footer">
-            <div>SG고등관 재원생 및 직원 전용 학습관리 시스템입니다.</div>
-            <div>계정 공유 및 타인의 계정 사용을 금지합니다.</div>
-            <div style="margin-top: 10px;">
-                © 2026 techtechchu · Developed for SG고등관
-            </div>
+            Made by techtechchu
         </div>
         """,
         unsafe_allow_html=True
