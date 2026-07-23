@@ -31,6 +31,18 @@ BOOKS = [
     "공통수학1 RPM"
 ]
 
+
+TEACHERS = ["이주백.T", "박병민.T", "노대근.T"]
+
+ROSTER_REQUIRED_COLUMNS = {
+    "반명",
+    "담당선생님",
+    "학생명",
+    "학교명",
+    "학년",
+    "매칭교재",
+}
+
 GRADES = ["중3", "고1", "고2", "고3"]
 
 try:
@@ -47,7 +59,7 @@ except Exception:
 try:
     SUPERADMIN_PASSWORD = st.secrets["SUPERADMIN_PASSWORD"]
 except Exception:
-    SUPERADMIN_PASSWORD = "TY2003!!"
+    SUPERADMIN_PASSWORD = None
 
 
 
@@ -426,6 +438,7 @@ def verify_supabase_connection():
     checks = [
         ("users", "username"),
         ("wrong_answers", "id"),
+        ("student_roster", "id"),
     ]
 
     for table_name, column_name in checks:
@@ -488,6 +501,304 @@ def fetch_all_rows(
         start += page_size
 
     return all_rows
+
+
+
+# ---------------------- 학생 명단·반·교재 관리 ----------------------
+def normalize_roster_grade(value) -> str:
+    """엑셀의 1, 2, 3 또는 고1, 고2 형식을 앱 학년 형식으로 통일합니다."""
+    raw = str(value or "").strip()
+
+    if raw.lower() == "nan" or not raw:
+        return "미지정"
+
+    if raw in {"1", "1.0"}:
+        return "고1"
+    if raw in {"2", "2.0"}:
+        return "고2"
+    if raw in {"3", "3.0"}:
+        return "중3"
+
+    return raw
+
+
+def get_roster_df() -> pd.DataFrame:
+    rows = fetch_all_rows(
+        "student_roster",
+        "id,class_name,teacher_name,student_name,school_name,grade,book_name,created_at",
+        order_column="teacher_name",
+        desc=False,
+    )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "기록ID", "반명", "담당선생님", "학생명",
+                "학교명", "학년", "매칭교재", "등록일시"
+            ]
+        )
+
+    return pd.DataFrame(
+        [
+            {
+                "기록ID": row.get("id"),
+                "반명": row.get("class_name", ""),
+                "담당선생님": row.get("teacher_name", ""),
+                "학생명": row.get("student_name", ""),
+                "학교명": row.get("school_name", ""),
+                "학년": row.get("grade", ""),
+                "매칭교재": row.get("book_name", ""),
+                "등록일시": row.get("created_at", ""),
+            }
+            for row in rows
+        ]
+    )
+
+
+def import_roster_from_excel(uploaded_file) -> dict:
+    """최종 학생명단 엑셀의 '학생명단' 시트를 Supabase에 일괄 저장합니다."""
+    df = pd.read_excel(uploaded_file, sheet_name="학생명단")
+    missing = ROSTER_REQUIRED_COLUMNS - set(df.columns)
+
+    if missing:
+        raise ValueError(
+            "명단 엑셀에 필요한 열이 없습니다: " + ", ".join(sorted(missing))
+        )
+
+    clean_df = df[
+        ["반명", "담당선생님", "학생명", "학교명", "학년", "매칭교재"]
+    ].copy()
+
+    for column in ["반명", "담당선생님", "학생명", "학교명", "매칭교재"]:
+        clean_df[column] = clean_df[column].fillna("").astype(str).str.strip()
+
+    clean_df["학년"] = clean_df["학년"].apply(normalize_roster_grade)
+    clean_df = clean_df[
+        (clean_df["학생명"] != "")
+        & (clean_df["반명"] != "")
+        & (clean_df["담당선생님"] != "")
+    ].drop_duplicates(
+        subset=["반명", "담당선생님", "학생명", "매칭교재"]
+    )
+
+    rows = [
+        {
+            "class_name": row["반명"],
+            "teacher_name": row["담당선생님"],
+            "student_name": row["학생명"],
+            "school_name": row["학교명"],
+            "grade": row["학년"],
+            "book_name": row["매칭교재"],
+            "created_at": now_kst_iso(),
+        }
+        for _, row in clean_df.iterrows()
+    ]
+
+    # 명단은 최신 업로드본을 기준으로 전체 교체
+    supabase.table("student_roster").delete().neq("id", 0).execute()
+
+    if rows:
+        supabase.table("student_roster").insert(rows).execute()
+
+    return {
+        "count": len(rows),
+        "teachers": sorted(clean_df["담당선생님"].unique().tolist()),
+        "classes": sorted(clean_df["반명"].unique().tolist()),
+    }
+
+
+def get_student_roster_rows(username: str) -> pd.DataFrame:
+    roster = get_roster_df()
+
+    if roster.empty:
+        return roster
+
+    return roster[roster["학생명"] == username].copy()
+
+
+def get_student_allowed_books(username: str) -> list[str]:
+    """학생에게 담당 선생님은 숨기고, 명단에 매칭된 교재만 반환합니다."""
+    student_rows = get_student_roster_rows(username)
+
+    if student_rows.empty:
+        return BOOKS
+
+    books = [
+        book for book in student_rows["매칭교재"].dropna().astype(str).tolist()
+        if book in BOOKS
+    ]
+
+    return list(dict.fromkeys(books)) or BOOKS
+
+
+def get_teacher_student_status_df() -> pd.DataFrame:
+    """명단 기준으로 학생별 오답 작성 여부와 문제 개수를 계산합니다."""
+    roster = get_roster_df()
+
+    if roster.empty:
+        return pd.DataFrame(
+            columns=[
+                "담당선생님", "반명", "학생명", "학교명",
+                "학년", "매칭교재", "작성여부", "작성문제수", "최근작성일시"
+            ]
+        )
+
+    answer_rows = fetch_all_rows(
+        "wrong_answers",
+        "username,unit,problem,created_at",
+        order_column="id",
+        desc=False,
+    )
+
+    answer_map: dict[tuple[str, str], dict] = {}
+
+    for row in answer_rows:
+        key = (
+            str(row.get("username", "")).strip(),
+            str(row.get("unit", "")).strip(),
+        )
+        info = answer_map.setdefault(
+            key,
+            {"numbers": [], "latest": ""}
+        )
+
+        for number in parse_problem_numbers(row.get("problem", "")):
+            if number not in info["numbers"]:
+                info["numbers"].append(number)
+
+        created_at = str(row.get("created_at", ""))
+        if created_at > info["latest"]:
+            info["latest"] = created_at
+
+    records = []
+
+    for _, row in roster.iterrows():
+        key = (str(row["학생명"]), str(row["매칭교재"]))
+        answer = answer_map.get(key, {"numbers": [], "latest": ""})
+        count = len(answer["numbers"])
+
+        records.append(
+            {
+                "담당선생님": row["담당선생님"],
+                "반명": row["반명"],
+                "학생명": row["학생명"],
+                "학교명": row["학교명"],
+                "학년": row["학년"],
+                "매칭교재": row["매칭교재"],
+                "작성여부": "O" if count > 0 else "X",
+                "작성문제수": count,
+                "최근작성일시": answer["latest"],
+            }
+        )
+
+    return pd.DataFrame(records)
+
+
+def simplify_class_for_paper(class_name: str, grade: str, book_name: str) -> str:
+    """
+    PDF 상단 제목에 들어갈 짧은 수업명 생성.
+    예: 화목토일(앞) 고2 미적분1 → 고2 미적분1
+    """
+    class_name = str(class_name or "").strip()
+    grade = str(grade or "").strip()
+
+    subject_map = {
+        "미적분1 고쟁이": "미적분1",
+        "확통 고쟁이": "확통",
+        "미적분2 쎈": "미적분2",
+        "기하 쎈": "기하",
+        "공통수학2 고쟁이": "공통수학2",
+        "공통수학2 RPM": "공통수학2",
+        "마플교과서 공통수학1": "공통수학1",
+        "공통수학1 RPM": "공통수학1",
+    }
+
+    subject = subject_map.get(book_name, "")
+    if grade and subject:
+        return f"{grade} {subject}"
+
+    # 요일 및 앞/뒤 표기를 제거한 보조 처리
+    cleaned = re.sub(r"^(월|화|수|목|금|토|일|,|\(|\)|앞|뒤)+\s*", "", class_name)
+    return cleaned or class_name
+
+
+def build_paper_title(
+    teacher_name: str,
+    class_name: str,
+    grade: str,
+    book_name: str,
+    month: int,
+    week: int
+) -> str:
+    teacher = str(teacher_name).replace(".", "").strip()
+    course = simplify_class_for_paper(class_name, grade, book_name)
+    return f"{teacher} {course} 오답 Paper - {month}월 {week}주차"
+
+
+def build_claude_export_df(
+    teacher_name: str,
+    class_name: str,
+    selected_students: list[str],
+    month: int,
+    week: int,
+) -> pd.DataFrame:
+    roster = get_roster_df()
+    answers = get_all_wrong_answers()
+
+    selected_roster = roster[
+        (roster["담당선생님"] == teacher_name)
+        & (roster["반명"] == class_name)
+        & (roster["학생명"].isin(selected_students))
+    ].copy()
+
+    records = []
+
+    for _, student in selected_roster.iterrows():
+        student_answers = answers[
+            (answers["학생"] == student["학생명"])
+            & (answers["교재"] == student["매칭교재"])
+        ].copy()
+
+        all_numbers = []
+        all_memos = []
+
+        for _, answer in student_answers.iterrows():
+            for number in parse_problem_numbers(answer["문제번호"]):
+                if number not in all_numbers:
+                    all_numbers.append(number)
+
+            memo = str(answer.get("비고", "") or "").strip()
+            if memo and memo not in all_memos:
+                all_memos.append(memo)
+
+        title = build_paper_title(
+            teacher_name,
+            class_name,
+            student["학년"],
+            student["매칭교재"],
+            month,
+            week,
+        )
+
+        records.append(
+            {
+                "학생명": student["학생명"],
+                "학교명": student["학교명"],
+                "학년": student["학년"],
+                "담당선생님": teacher_name,
+                "반명": class_name,
+                "교재": student["매칭교재"],
+                "문제번호": format_problem_numbers(all_numbers),
+                "비고": " / ".join(all_memos),
+                "PDF상단제목": title,
+                "파일명": (
+                    f"[오답paper][{student['학년']} {student['학생명']}]"
+                    f"[{month}월 {week}주차].pdf"
+                ),
+            }
+        )
+
+    return pd.DataFrame(records)
 
 
 # ---------------------- 비밀번호 처리 ----------------------
@@ -1274,7 +1585,15 @@ def show_student():
 
         st.subheader("오답 작성")
 
-        book = st.selectbox("교재 선택", BOOKS)
+        allowed_books = get_student_allowed_books(
+            st.session_state.student_user
+        )
+
+        book = st.selectbox(
+            "교재 선택",
+            allowed_books,
+            help="학생 명단에 매칭된 교재만 표시됩니다."
+        )
 
         problem_number = st.text_input(
             "문제 번호",
@@ -1389,18 +1708,17 @@ def show_student():
             st.rerun()
 
 
-# ---------------------- 관리자 화면 ----------------------
+# ---------------------- 선생님 관리 화면 ----------------------
 def show_admin():
     if not st.session_state.is_admin:
         show_banner()
 
         st.title("👨‍🏫 선생님 로그인")
-
-        pw = st.text_input("관리자 비밀번호", type="password")
+        pw = st.text_input("선생님 공용 비밀번호", type="password")
 
         if st.button("로그인"):
             if ADMIN_PASSWORD is None:
-                st.error("관리자 비밀번호가 설정되지 않았습니다.")
+                st.error("선생님 비밀번호가 설정되지 않았습니다.")
             elif pw == ADMIN_PASSWORD:
                 st.session_state.is_admin = True
                 st.rerun()
@@ -1413,11 +1731,20 @@ def show_admin():
             st.session_state.role = None
             st.rerun()
 
-    else:
-        show_banner()
+        return
 
-        st.title("📋 전체 오답 현황")
+    show_banner()
+    st.title("👨‍🏫 선생님 관리")
 
+    tab_answers, tab_teacher_students, tab_paper = st.tabs(
+        [
+            "📋 전체 오답 현황",
+            "👥 선생님별 학생",
+            "🧾 오답노트 만들기",
+        ]
+    )
+
+    with tab_answers:
         df = get_all_wrong_answers()
 
         if df.empty:
@@ -1430,99 +1757,253 @@ def show_admin():
             with col1:
                 student_filter = st.selectbox(
                     "학생 필터",
-                    ["전체"] + sorted(df["학생"].unique().tolist())
+                    ["전체"] + sorted(df["학생"].unique().tolist()),
+                    key="answer_student_filter",
                 )
 
             with col2:
                 grade_filter = st.selectbox(
                     "학년 필터",
-                    ["전체"] + sorted(df["학년"].unique().tolist())
+                    ["전체"] + sorted(df["학년"].unique().tolist()),
+                    key="answer_grade_filter",
                 )
 
             with col3:
                 book_filter = st.selectbox(
                     "교재 필터",
-                    ["전체"] + BOOKS
+                    ["전체"] + BOOKS,
+                    key="answer_book_filter",
                 )
 
             display_df = df.copy()
 
             if student_filter != "전체":
                 display_df = display_df[display_df["학생"] == student_filter]
-
             if grade_filter != "전체":
                 display_df = display_df[display_df["학년"] == grade_filter]
-
             if book_filter != "전체":
                 display_df = display_df[display_df["교재"] == book_filter]
 
             st.write(f"총 {len(display_df)}건")
-
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True
-            )
-
-            excel_data = dataframe_to_excel_bytes(display_df)
+            st.dataframe(display_df, use_container_width=True, hide_index=True)
 
             st.download_button(
                 "엑셀로 다운로드",
-                data=excel_data,
+                data=dataframe_to_excel_bytes(display_df),
                 file_name="오답노트.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_all_answers",
             )
 
-            st.divider()
-
             with st.expander("✏️ 잘못 선택한 교재 수정", expanded=False):
-                st.info(
-                    "학생이 교재를 잘못 선택한 경우 올바른 교재로 변경할 수 있습니다."
-                )
                 render_wrong_answer_book_editor("teacher")
-
-            st.divider()
 
             with st.expander("🧩 변형문제 필요 학생", expanded=False):
                 variant_df = display_df[
                     display_df["비고"].fillna("").str.contains(
-                        "변형",
-                        case=False,
-                        na=False,
-                        regex=False
+                        "변형", case=False, na=False, regex=False
                     )
                 ].copy()
 
                 if variant_df.empty:
-                    st.info("현재 필터 기준에서 비고에 '변형'이 포함된 기록이 없습니다.")
+                    st.info("비고에 '변형'이 포함된 기록이 없습니다.")
                 else:
-                    st.write(f"변형문제 필요 기록: **{len(variant_df)}건**")
-
                     st.dataframe(
                         variant_df,
                         use_container_width=True,
                         hide_index=True
                     )
-
-                    variant_excel = dataframe_to_excel_bytes(variant_df)
-
                     st.download_button(
                         "변형문제 필요 학생 엑셀 다운로드",
-                        data=variant_excel,
+                        data=dataframe_to_excel_bytes(variant_df),
                         file_name="변형문제_필요학생.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                        key="download_variant_students",
                     )
 
-        st.divider()
+    with tab_teacher_students:
+        status_df = get_teacher_student_status_df()
 
-        st.caption("학생 계정 및 비밀번호 관리는 아래의 별도 관리자 화면에서 진행합니다.")
+        if status_df.empty:
+            st.info(
+                "등록된 학생 명단이 없습니다. 관리자 화면에서 최종 명단 엑셀을 먼저 업로드해주세요."
+            )
+        else:
+            teacher_options = sorted(
+                status_df["담당선생님"].dropna().unique().tolist()
+            )
 
-        st.divider()
+            selected_teacher = st.selectbox(
+                "담당 선생님",
+                teacher_options,
+                key="teacher_student_teacher",
+            )
 
-        if st.button("로그아웃"):
-            st.session_state.is_admin = False
-            st.session_state.role = None
-            st.rerun()
+            teacher_df = status_df[
+                status_df["담당선생님"] == selected_teacher
+            ].copy()
+
+            class_options = ["전체"] + sorted(
+                teacher_df["반명"].dropna().unique().tolist()
+            )
+
+            selected_class = st.selectbox(
+                "반 선택",
+                class_options,
+                key="teacher_student_class",
+            )
+
+            if selected_class != "전체":
+                teacher_df = teacher_df[
+                    teacher_df["반명"] == selected_class
+                ]
+
+            col1, col2, col3 = st.columns(3)
+            total_students = len(teacher_df)
+            completed_students = int((teacher_df["작성여부"] == "O").sum())
+            incomplete_students = total_students - completed_students
+
+            col1.metric("명단 학생", total_students)
+            col2.metric("작성 O", completed_students)
+            col3.metric("미작성 X", incomplete_students)
+
+            st.dataframe(
+                teacher_df[
+                    [
+                        "반명", "학생명", "학교명", "학년",
+                        "매칭교재", "작성여부", "작성문제수", "최근작성일시"
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+            st.download_button(
+                "선생님별 학생 현황 엑셀 다운로드",
+                data=dataframe_to_excel_bytes(teacher_df),
+                file_name=f"{selected_teacher}_학생현황.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                key="download_teacher_status",
+            )
+
+    with tab_paper:
+        roster = get_roster_df()
+
+        if roster.empty:
+            st.info(
+                "등록된 학생 명단이 없습니다. 관리자 화면에서 명단 엑셀을 먼저 업로드해주세요."
+            )
+        else:
+            teacher_options = sorted(
+                roster["담당선생님"].dropna().unique().tolist()
+            )
+
+            selected_teacher = st.selectbox(
+                "1. 담당 선생님",
+                teacher_options,
+                key="paper_teacher",
+            )
+
+            teacher_roster = roster[
+                roster["담당선생님"] == selected_teacher
+            ]
+
+            class_options = sorted(
+                teacher_roster["반명"].dropna().unique().tolist()
+            )
+
+            selected_class = st.selectbox(
+                "2. 반 선택",
+                class_options,
+                key="paper_class",
+            )
+
+            class_roster = teacher_roster[
+                teacher_roster["반명"] == selected_class
+            ].copy()
+
+            student_options = sorted(
+                class_roster["학생명"].dropna().unique().tolist()
+            )
+
+            selected_students = st.multiselect(
+                "3. 오답노트를 만들 학생",
+                student_options,
+                default=student_options,
+                key="paper_students",
+            )
+
+            col_month, col_week = st.columns(2)
+
+            with col_month:
+                month = st.selectbox(
+                    "4. 월",
+                    list(range(1, 13)),
+                    index=datetime.now(KST).month - 1,
+                    key="paper_month",
+                )
+
+            with col_week:
+                week = st.selectbox(
+                    "5. 주차",
+                    [1, 2, 3, 4, 5],
+                    index=min((datetime.now(KST).day - 1) // 7, 4),
+                    key="paper_week",
+                )
+
+            if not class_roster.empty:
+                sample = class_roster.iloc[0]
+                title_preview = build_paper_title(
+                    selected_teacher,
+                    selected_class,
+                    sample["학년"],
+                    sample["매칭교재"],
+                    month,
+                    week,
+                )
+
+                st.markdown("#### PDF 상단 제목 미리보기")
+                st.code(title_preview, language="text")
+                st.caption(
+                    "기존의 ‘이주백T 고1 미적분1 오답 Paper’ 부분을 "
+                    "선생님·반·교재 정보에 맞춰 자동 생성합니다."
+                )
+
+            if selected_students:
+                export_df = build_claude_export_df(
+                    selected_teacher,
+                    selected_class,
+                    selected_students,
+                    month,
+                    week,
+                )
+
+                st.dataframe(
+                    export_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.download_button(
+                    "Claude Code 자동생성용 엑셀 다운로드",
+                    data=dataframe_to_excel_bytes(export_df),
+                    file_name=(
+                        f"{selected_teacher}_{selected_class}_"
+                        f"{month}월_{week}주차_오답노트생성.xlsx"
+                    ),
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_claude_export",
+                    type="primary",
+                )
+            else:
+                st.warning("오답노트를 만들 학생을 한 명 이상 선택해주세요.")
+
+    st.divider()
+
+    if st.button("로그아웃", key="teacher_logout"):
+        st.session_state.is_admin = False
+        st.session_state.role = None
+        st.rerun()
 
 
 # ---------------------- 별도 관리자 화면 ----------------------
@@ -1540,7 +2021,9 @@ def show_superadmin():
         )
 
         if st.button("관리자 로그인", key="superadmin_login_button"):
-            if admin_pw == SUPERADMIN_PASSWORD:
+            if SUPERADMIN_PASSWORD is None:
+                st.error("관리자 비밀번호가 설정되지 않았습니다.")
+            elif admin_pw == SUPERADMIN_PASSWORD:
                 st.session_state.is_superadmin = True
                 st.rerun()
             else:
@@ -1557,6 +2040,68 @@ def show_superadmin():
 
         st.title("🔐 관리자 전용")
         st.caption("학생 계정 복구, 비밀번호 확인·초기화 및 회원 관리를 진행할 수 있습니다.")
+
+        st.divider()
+
+        with st.expander("📚 학생 명단·반·교재 등록", expanded=True):
+            st.info(
+                "최종 명단 엑셀을 업로드하면 담당 선생님·반·학생·교재 정보가 "
+                "Supabase에 저장됩니다. 학생 화면에는 담당 선생님 정보가 표시되지 않습니다."
+            )
+
+            roster_file = st.file_uploader(
+                "최종 명단 엑셀 업로드",
+                type=["xlsx"],
+                key="roster_excel_upload",
+            )
+
+            roster_confirm = st.checkbox(
+                "기존 명단을 업로드한 최신 명단으로 교체합니다.",
+                key="roster_replace_confirm",
+            )
+
+            if st.button(
+                "학생 명단 반영",
+                type="primary",
+                key="import_roster_button",
+            ):
+                if roster_file is None:
+                    st.warning("최종 명단 엑셀을 업로드해주세요.")
+                elif not roster_confirm:
+                    st.warning("명단 교체 확인 항목에 체크해주세요.")
+                else:
+                    try:
+                        result = import_roster_from_excel(roster_file)
+                        st.success(
+                            f"명단 {result['count']}건을 저장했습니다. "
+                            f"선생님 {len(result['teachers'])}명, "
+                            f"반 {len(result['classes'])}개가 반영되었습니다."
+                        )
+                        st.rerun()
+                    except Exception as error:
+                        st.error(f"명단 반영 중 오류가 발생했습니다: {error}")
+
+            roster_df = get_roster_df()
+
+            if not roster_df.empty:
+                st.dataframe(
+                    roster_df[
+                        [
+                            "반명", "담당선생님", "학생명",
+                            "학교명", "학년", "매칭교재"
+                        ]
+                    ],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+                st.download_button(
+                    "현재 명단 엑셀 다운로드",
+                    data=dataframe_to_excel_bytes(roster_df),
+                    file_name="현재_학생명단.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_current_roster",
+                )
 
         st.divider()
 
