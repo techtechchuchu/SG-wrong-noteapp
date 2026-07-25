@@ -1498,6 +1498,156 @@ def ensure_print_status_records(
     return len(insert_rows)
 
 
+
+def ensure_selected_print_status_records(
+    teacher_name: str,
+    class_name: str,
+    student_names: list[str],
+    month: int,
+    week: int,
+) -> int:
+    """
+    오답노트 생성 대상으로 선택된 학생만 출력 관리 목록에 등록합니다.
+    이미 등록된 학생·교재·월·주차 조합은 중복 생성하지 않습니다.
+    """
+    clean_students = [
+        str(name).strip()
+        for name in student_names
+        if str(name).strip()
+    ]
+
+    if not clean_students:
+        return 0
+
+    roster = get_roster_df()
+
+    target = roster[
+        (roster["담당선생님"] == teacher_name)
+        & (roster["반명"] == class_name)
+        & (roster["학생명"].isin(clean_students))
+    ].copy()
+
+    if target.empty:
+        return 0
+
+    existing_rows = fetch_all_rows(
+        "print_status",
+        "student_name,book_name",
+        filters=[
+            ("teacher_name", "eq", teacher_name),
+            ("class_name", "eq", class_name),
+            ("month", "eq", int(month)),
+            ("week", "eq", int(week)),
+        ],
+    )
+
+    existing_keys = {
+        (
+            str(row.get("student_name", "")).strip(),
+            str(row.get("book_name", "")).strip(),
+        )
+        for row in existing_rows
+    }
+
+    insert_rows = []
+
+    for _, row in target.iterrows():
+        student_name = str(row["학생명"]).strip()
+        book_name = str(row["매칭교재"]).strip()
+        key = (student_name, book_name)
+
+        if key in existing_keys:
+            continue
+
+        insert_rows.append(
+            {
+                "teacher_name": teacher_name,
+                "class_name": class_name,
+                "student_name": student_name,
+                "book_name": book_name,
+                "month": int(month),
+                "week": int(week),
+                "is_printed": False,
+                "printed_at": None,
+                "memo": "",
+                "created_at": now_kst_iso(),
+            }
+        )
+
+    if insert_rows:
+        supabase.table("print_status").insert(insert_rows).execute()
+
+    return len(insert_rows)
+
+
+def register_print_queue_on_download(
+    teacher_name: str,
+    class_name: str,
+    student_names: list[str],
+    month: int,
+    week: int,
+):
+    """
+    Claude Code용 오답노트 엑셀 다운로드 버튼을 누를 때
+    선택 학생을 출력 대기 목록에 자동 등록합니다.
+    """
+    try:
+        created_count = ensure_selected_print_status_records(
+            teacher_name,
+            class_name,
+            student_names,
+            month,
+            week,
+        )
+        st.session_state["print_auto_register_result"] = {
+            "created_count": created_count,
+            "student_count": len(student_names),
+            "teacher_name": teacher_name,
+            "class_name": class_name,
+            "month": month,
+            "week": week,
+        }
+    except Exception as error:
+        st.session_state["print_auto_register_error"] = str(error)
+
+
+def update_print_status_bulk(
+    record_ids: list[int],
+    is_printed: bool,
+) -> int:
+    """여러 출력 관리 기록을 한 번에 완료 또는 미완료로 변경합니다."""
+    clean_ids = sorted(
+        {
+            int(record_id)
+            for record_id in record_ids
+            if record_id is not None
+        }
+    )
+
+    if not clean_ids:
+        return 0
+
+    payload = {
+        "is_printed": bool(is_printed),
+        "printed_at": now_kst_iso() if is_printed else None,
+    }
+
+    updated_count = 0
+
+    # Supabase Python 클라이언트 버전 차이를 피하기 위해
+    # 한 건씩 안정적으로 업데이트합니다.
+    for record_id in clean_ids:
+        response = (
+            supabase.table("print_status")
+            .update(payload)
+            .eq("id", record_id)
+            .execute()
+        )
+        updated_count += len(response.data or [])
+
+    return updated_count
+
+
 def update_print_status(
     record_id: int,
     *,
@@ -1541,6 +1691,11 @@ def render_print_management():
         teacher_options = sorted(
             roster["담당선생님"].dropna().astype(str).unique().tolist()
         )
+
+        if not teacher_options:
+            st.info("등록된 담당 선생님이 없습니다.")
+            return
+
         selected_teacher = st.selectbox(
             "담당 선생님",
             teacher_options,
@@ -1561,6 +1716,10 @@ def render_print_management():
     class_options = sorted(
         teacher_roster["반명"].dropna().astype(str).unique().tolist()
     )
+
+    if not class_options:
+        st.info("등록된 반이 없습니다.")
+        return
 
     selected_class = st.selectbox(
         "반 선택",
@@ -1586,27 +1745,46 @@ def render_print_management():
             key="print_manage_week",
         )
 
-    if st.button(
-        "현재 반 출력 목록 불러오기",
-        type="primary",
-        key="print_manage_load",
-    ):
-        created_count = ensure_print_status_records(
-            selected_teacher,
-            selected_class,
-            month,
-            week,
-        )
-        if created_count:
-            st.success(f"출력 관리 목록에 {created_count}건을 추가했습니다.")
-        else:
-            st.info("이미 출력 관리 목록에 등록된 학생들입니다.")
-        st.rerun()
+    col_load, col_refresh = st.columns([3, 1])
+
+    with col_load:
+        if st.button(
+            "현재 반 전체 학생을 출력 목록에 등록",
+            type="primary",
+            key="print_manage_load",
+            use_container_width=True,
+        ):
+            created_count = ensure_print_status_records(
+                selected_teacher,
+                selected_class,
+                month,
+                week,
+            )
+
+            if created_count:
+                st.success(
+                    f"출력 관리 목록에 {created_count}건을 추가했습니다."
+                )
+            else:
+                st.info("이미 출력 관리 목록에 등록된 학생들입니다.")
+
+            st.rerun()
+
+    with col_refresh:
+        if st.button(
+            "새로고침",
+            key="print_manage_refresh",
+            use_container_width=True,
+        ):
+            st.rerun()
 
     status_df = get_print_status_rows(selected_teacher)
 
     if status_df.empty:
-        st.info("아직 생성된 출력 관리 목록이 없습니다.")
+        st.info(
+            "아직 생성된 출력 관리 목록이 없습니다. "
+            "오답노트 엑셀을 다운로드하거나 위 버튼으로 목록을 등록해주세요."
+        )
         return
 
     display_df = status_df[
@@ -1616,8 +1794,16 @@ def render_print_management():
     ].copy()
 
     if display_df.empty:
-        st.info("선택한 반·월·주차에 등록된 출력 목록이 없습니다.")
+        st.info(
+            "선택한 반·월·주차에 등록된 출력 목록이 없습니다. "
+            "오답노트 생성 탭에서 엑셀을 다운로드하면 자동 등록됩니다."
+        )
         return
+
+    display_df = display_df.sort_values(
+        by=["출력완료", "학생명", "교재"],
+        ascending=[True, True, True],
+    ).reset_index(drop=True)
 
     completed = int(display_df["출력완료"].sum())
     total = len(display_df)
@@ -1627,11 +1813,107 @@ def render_print_management():
     col2.metric("출력 완료", completed)
     col3.metric("미출력", total - completed)
 
-    st.caption(
-        "학생별 체크박스를 변경한 뒤 저장 버튼을 눌러야 Supabase에 반영됩니다."
+    status_filter = st.radio(
+        "표시할 상태",
+        ["전체", "미출력", "출력 완료"],
+        horizontal=True,
+        key="print_status_filter",
     )
 
-    for _, row in display_df.iterrows():
+    filtered_df = display_df.copy()
+
+    if status_filter == "미출력":
+        filtered_df = filtered_df[
+            filtered_df["출력완료"] == False
+        ].copy()
+    elif status_filter == "출력 완료":
+        filtered_df = filtered_df[
+            filtered_df["출력완료"] == True
+        ].copy()
+
+    st.caption(
+        "개별 저장도 가능하며, 아래에서 여러 학생을 선택해 "
+        "출력 완료 또는 미출력 상태로 한 번에 변경할 수 있습니다."
+    )
+
+    if filtered_df.empty:
+        st.info(f"현재 '{status_filter}' 상태의 학생이 없습니다.")
+        return
+
+    option_map = {
+        int(row["기록ID"]): (
+            f"{row['학생명']} · {row['교재']}"
+            + (" · 완료" if bool(row["출력완료"]) else " · 미출력")
+        )
+        for _, row in filtered_df.iterrows()
+    }
+
+    visible_ids = list(option_map.keys())
+
+    selected_ids = st.multiselect(
+        "일괄 처리할 학생 선택",
+        options=visible_ids,
+        default=[],
+        format_func=lambda record_id: option_map.get(
+            record_id,
+            str(record_id),
+        ),
+        key=(
+            f"print_bulk_selection_"
+            f"{selected_teacher}_{selected_class}_{month}_{week}_{status_filter}"
+        ),
+        placeholder="학생을 여러 명 선택할 수 있습니다.",
+    )
+
+    col_all, col_none, col_complete, col_incomplete = st.columns(4)
+
+    with col_all:
+        if st.button(
+            "현재 목록 전체 선택",
+            key="print_select_all_help",
+            use_container_width=True,
+        ):
+            st.info(
+                "위 선택창을 클릭한 뒤 Ctrl+A 또는 학생을 여러 명 선택해주세요. "
+                "Streamlit 기본 선택창 특성상 버튼으로 선택값을 강제 변경하지 않습니다."
+            )
+
+    with col_none:
+        selected_count = len(selected_ids)
+        st.metric("선택 인원", selected_count)
+
+    with col_complete:
+        if st.button(
+            "선택 학생 출력 완료",
+            type="primary",
+            key="print_bulk_complete",
+            use_container_width=True,
+            disabled=not selected_ids,
+        ):
+            updated_count = update_print_status_bulk(
+                selected_ids,
+                True,
+            )
+            st.success(f"{updated_count}건을 출력 완료 처리했습니다.")
+            st.rerun()
+
+    with col_incomplete:
+        if st.button(
+            "선택 학생 미출력 처리",
+            key="print_bulk_incomplete",
+            use_container_width=True,
+            disabled=not selected_ids,
+        ):
+            updated_count = update_print_status_bulk(
+                selected_ids,
+                False,
+            )
+            st.success(f"{updated_count}건을 미출력 상태로 변경했습니다.")
+            st.rerun()
+
+    st.divider()
+
+    for _, row in filtered_df.iterrows():
         record_id = int(row["기록ID"])
 
         with st.container(border=True):
@@ -1641,6 +1923,7 @@ def render_print_management():
                 st.markdown(
                     f"**{row['학생명']}** · {row['교재']}"
                 )
+
                 if row["출력일시"]:
                     st.caption(f"최근 출력일시: {row['출력일시']}")
 
@@ -1671,7 +1954,9 @@ def render_print_management():
                         is_printed=checked,
                         memo=memo,
                     )
-                    st.success(f"{row['학생명']} 학생의 출력 상태를 저장했습니다.")
+                    st.success(
+                        f"{row['학생명']} 학생의 출력 상태를 저장했습니다."
+                    )
                     st.rerun()
 
             with col_delete:
@@ -1684,11 +1969,11 @@ def render_print_management():
                     st.rerun()
 
     st.download_button(
-        "출력 관리 현황 엑셀 다운로드",
-        data=dataframe_to_excel_bytes(display_df),
+        "현재 필터 결과 엑셀 다운로드",
+        data=dataframe_to_excel_bytes(filtered_df),
         file_name=(
             f"{selected_teacher}_{selected_class}_"
-            f"{month}월_{week}주차_출력관리.xlsx"
+            f"{month}월_{week}주차_{status_filter}_출력관리.xlsx"
         ),
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         key="download_print_status",
@@ -2704,6 +2989,16 @@ def show_student():
                 else:
                     st.warning(result["message"])
 
+                    if result.get("duplicate_numbers"):
+                        duplicate_text = ", ".join(
+                            result["duplicate_numbers"]
+                        )
+                        st.info(
+                            f"중복 감지된 문제번호: {duplicate_text}\n\n"
+                            "같은 학생·같은 교재에 이미 등록된 번호이므로 "
+                            "추가 저장하지 않았습니다."
+                        )
+
         st.divider()
 
         with st.expander("🔐 비밀번호 변경", expanded=False):
@@ -3175,6 +3470,29 @@ def show_admin():
                     hide_index=True,
                 )
 
+                if "print_auto_register_error" in st.session_state:
+                    st.error(
+                        "최근 출력 목록 자동 등록 중 오류가 발생했습니다: "
+                        f"{st.session_state.pop('print_auto_register_error')}"
+                    )
+
+                if "print_auto_register_result" in st.session_state:
+                    auto_result = st.session_state.pop(
+                        "print_auto_register_result"
+                    )
+                    created_count = auto_result["created_count"]
+
+                    if created_count:
+                        st.success(
+                            f"선택한 학생 중 {created_count}건을 "
+                            "출력 관리의 미출력 목록에 자동 등록했습니다."
+                        )
+                    else:
+                        st.info(
+                            "선택한 학생은 이미 해당 월·주차의 "
+                            "출력 관리 목록에 등록되어 있습니다."
+                        )
+
                 st.download_button(
                     "Claude Code 자동생성용 엑셀 다운로드",
                     data=dataframe_to_excel_bytes(export_df),
@@ -3185,6 +3503,23 @@ def show_admin():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_claude_export",
                     type="primary",
+                    on_click=register_print_queue_on_download,
+                    args=(
+                        selected_teacher,
+                        selected_class,
+                        selected_students,
+                        month,
+                        week,
+                    ),
+                    help=(
+                        "다운로드와 동시에 선택 학생을 출력 관리의 "
+                        "미출력 목록에 자동 등록합니다."
+                    ),
+                )
+
+                st.caption(
+                    "이 버튼을 누르면 엑셀 다운로드와 동시에 선택 학생이 "
+                    "출력 관리 탭의 미출력 목록에 자동 등록됩니다."
                 )
             else:
                 st.warning("오답노트를 만들 학생을 한 명 이상 선택해주세요.")
