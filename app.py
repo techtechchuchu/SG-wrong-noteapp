@@ -1847,9 +1847,31 @@ def show_admin():
 
     with tab_answers:
         df = get_all_wrong_answers()
+        roster = get_roster_df()
+        current_teacher = st.session_state.teacher_name
+
+        if not current_teacher:
+            st.warning("로그인한 선생님 정보가 없습니다. 로그아웃 후 다시 로그인해주세요.")
+            df = pd.DataFrame()
+        elif roster.empty:
+            st.info("등록된 학생 명단이 없습니다.")
+            df = pd.DataFrame()
+        else:
+            teacher_roster = roster[
+                roster["담당선생님"] == current_teacher
+            ][["학생명", "매칭교재"]].drop_duplicates()
+
+            # 같은 이름의 다른 학생 또는 다른 교재 기록이 섞이지 않도록
+            # 학생명 + 교재를 함께 기준으로 로그인한 선생님의 기록만 표시합니다.
+            df = df.merge(
+                teacher_roster,
+                left_on=["학생", "교재"],
+                right_on=["학생명", "매칭교재"],
+                how="inner"
+            ).drop(columns=["학생명", "매칭교재"])
 
         if df.empty:
-            st.info("아직 기록된 오답이 없습니다.")
+            st.info(f"{current_teacher or '해당 선생님'} 담당 학생의 오답 기록이 없습니다.")
         else:
             df["학년"] = df["학년"].fillna("미지정")
 
@@ -1885,13 +1907,19 @@ def show_admin():
             if book_filter != "전체":
                 display_df = display_df[display_df["교재"] == book_filter]
 
+            st.caption(f"{current_teacher} 담당 학생의 오답 기록만 표시됩니다.")
             st.write(f"총 {len(display_df)}건")
-            st.dataframe(display_df, use_container_width=True, hide_index=True)
+            st.dataframe(
+                display_df,
+                use_container_width=True,
+                hide_index=True,
+                height=520
+            )
 
             st.download_button(
                 "엑셀로 다운로드",
                 data=dataframe_to_excel_bytes(display_df),
-                file_name="오답노트.xlsx",
+                file_name=f"{current_teacher}_전체오답현황.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="download_all_answers",
             )
