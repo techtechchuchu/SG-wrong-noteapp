@@ -1466,6 +1466,543 @@ def update_user_grade(username: str, new_grade: str):
     )
 
 
+
+def username_exists(username: str, exclude_username: str | None = None) -> bool:
+    """users 테이블에서 학생 이름의 중복 여부를 확인합니다."""
+    username = str(username or "").strip()
+
+    if not username:
+        return False
+
+    response = (
+        supabase.table("users")
+        .select("username")
+        .eq("username", username)
+        .limit(1)
+        .execute()
+    )
+
+    if not response.data:
+        return False
+
+    return username != str(exclude_username or "").strip()
+
+
+def rename_student_everywhere(old_name: str, new_name: str) -> dict:
+    """
+    학생 이름을 users, wrong_answers, student_roster에서 함께 변경합니다.
+    기존 오답과 명단 연결이 끊기지 않도록 세 테이블을 같은 이름으로 맞춥니다.
+    """
+    old_name = str(old_name or "").strip()
+    new_name = str(new_name or "").strip()
+
+    if not old_name or not new_name:
+        raise ValueError("현재 이름과 새 이름을 모두 입력해주세요.")
+
+    if old_name == new_name:
+        raise ValueError("현재 이름과 새 이름이 같습니다.")
+
+    if username_exists(new_name, exclude_username=old_name):
+        raise ValueError("새 이름으로 이미 가입된 학생 계정이 있습니다.")
+
+    roster_duplicate = (
+        supabase.table("student_roster")
+        .select("id")
+        .eq("student_name", new_name)
+        .limit(1)
+        .execute()
+    )
+
+    if roster_duplicate.data:
+        raise ValueError(
+            "새 이름과 동일한 학생이 명단에 이미 있습니다. "
+            "동명이인이라면 이름 뒤에 숫자 등을 붙여 구분해주세요."
+        )
+
+    updated = {
+        "users": 0,
+        "wrong_answers": 0,
+        "student_roster": 0,
+    }
+
+    user_response = (
+        supabase.table("users")
+        .update({"username": new_name})
+        .eq("username", old_name)
+        .execute()
+    )
+    updated["users"] = len(user_response.data or [])
+
+    answer_response = (
+        supabase.table("wrong_answers")
+        .update({"username": new_name})
+        .eq("username", old_name)
+        .execute()
+    )
+    updated["wrong_answers"] = len(answer_response.data or [])
+
+    roster_response = (
+        supabase.table("student_roster")
+        .update({"student_name": new_name})
+        .eq("student_name", old_name)
+        .execute()
+    )
+    updated["student_roster"] = len(roster_response.data or [])
+
+    return updated
+
+
+def update_roster_record(
+    record_id: int,
+    *,
+    teacher_name: str,
+    class_name: str,
+    school_name: str,
+    grade: str,
+    book_name: str,
+):
+    """선택한 수강 등록 행의 담당 선생님·반·학교·학년·교재를 변경합니다."""
+    payload = {
+        "teacher_name": str(teacher_name or "").strip(),
+        "class_name": str(class_name or "").strip(),
+        "school_name": str(school_name or "").strip(),
+        "grade": str(grade or "").strip(),
+        "book_name": str(book_name or "").strip(),
+    }
+
+    if not payload["teacher_name"]:
+        raise ValueError("담당 선생님을 선택해주세요.")
+    if not payload["class_name"]:
+        raise ValueError("반명을 입력해주세요.")
+    if not payload["school_name"]:
+        raise ValueError("학교명을 입력해주세요.")
+    if not payload["grade"]:
+        raise ValueError("학년을 선택해주세요.")
+    if not payload["book_name"]:
+        raise ValueError("교재를 선택해주세요.")
+
+    (
+        supabase.table("student_roster")
+        .update(payload)
+        .eq("id", int(record_id))
+        .execute()
+    )
+
+
+def update_student_grade_everywhere(username: str, new_grade: str):
+    """학생 계정 학년과 명단에 등록된 모든 학년을 함께 변경합니다."""
+    username = str(username or "").strip()
+    new_grade = str(new_grade or "").strip()
+
+    (
+        supabase.table("users")
+        .update({"grade": new_grade})
+        .eq("username", username)
+        .execute()
+    )
+
+    (
+        supabase.table("student_roster")
+        .update({"grade": new_grade})
+        .eq("student_name", username)
+        .execute()
+    )
+
+
+def delete_student_management(
+    username: str,
+    *,
+    delete_user_account: bool,
+    delete_roster: bool,
+    delete_answers: bool,
+) -> dict:
+    """선택 옵션에 따라 학생 계정·명단·오답 기록을 삭제합니다."""
+    username = str(username or "").strip()
+    result = {
+        "users": 0,
+        "student_roster": 0,
+        "wrong_answers": 0,
+    }
+
+    if delete_answers:
+        response = (
+            supabase.table("wrong_answers")
+            .delete()
+            .eq("username", username)
+            .execute()
+        )
+        result["wrong_answers"] = len(response.data or [])
+
+    if delete_roster:
+        response = (
+            supabase.table("student_roster")
+            .delete()
+            .eq("student_name", username)
+            .execute()
+        )
+        result["student_roster"] = len(response.data or [])
+
+    if delete_user_account:
+        response = (
+            supabase.table("users")
+            .delete()
+            .eq("username", username)
+            .execute()
+        )
+        result["users"] = len(response.data or [])
+
+    return result
+
+
+def render_student_management():
+    """관리자 전용 학생 통합 관리 화면입니다."""
+    roster_df = get_roster_df()
+    users_df = get_all_users()
+
+    roster_names = (
+        roster_df["학생명"].dropna().astype(str).tolist()
+        if not roster_df.empty
+        else []
+    )
+    user_names = (
+        users_df["학생"].dropna().astype(str).tolist()
+        if not users_df.empty
+        else []
+    )
+
+    student_names = sorted(
+        {
+            name.strip()
+            for name in roster_names + user_names
+            if str(name).strip()
+        }
+    )
+
+    if not student_names:
+        st.info("관리할 학생이 없습니다.")
+        return
+
+    selected_student = st.selectbox(
+        "관리할 학생",
+        student_names,
+        key="student_management_student",
+    )
+
+    selected_roster = (
+        roster_df[roster_df["학생명"] == selected_student].copy()
+        if not roster_df.empty
+        else pd.DataFrame()
+    )
+
+    st.caption(
+        "학생 이름 변경은 계정·오답 기록·학생 명단에 함께 반영됩니다. "
+        "담당 선생님·반·학교·교재는 선택한 수강 등록 행에만 반영됩니다."
+    )
+
+    tab_name, tab_roster, tab_delete = st.tabs(
+        [
+            "✏️ 이름·학년 수정",
+            "🏫 담당·반·학교·교재",
+            "🗑️ 학생 삭제",
+        ]
+    )
+
+    with tab_name:
+        st.markdown("#### 학생 이름 수정")
+
+        new_student_name = st.text_input(
+            "새 학생 이름",
+            value=selected_student,
+            key="student_management_new_name",
+        )
+
+        rename_confirm = st.checkbox(
+            "계정·오답 기록·학생 명단의 이름을 모두 변경합니다.",
+            key="student_management_rename_confirm",
+        )
+
+        if st.button(
+            "학생 이름 변경",
+            type="primary",
+            key="student_management_rename_button",
+        ):
+            if not rename_confirm:
+                st.warning("이름 변경 확인 항목에 체크해주세요.")
+            else:
+                try:
+                    rename_student_everywhere(
+                        selected_student,
+                        new_student_name,
+                    )
+                    st.success(
+                        f"'{selected_student}' 학생의 이름을 "
+                        f"'{new_student_name.strip()}'으로 변경했습니다."
+                    )
+                    st.rerun()
+                except Exception as error:
+                    st.error(f"이름 변경 중 오류가 발생했습니다: {error}")
+
+        st.divider()
+        st.markdown("#### 학생 학년 일괄 수정")
+
+        current_grade = "미지정"
+
+        if not users_df.empty:
+            grade_values = users_df.loc[
+                users_df["학생"] == selected_student,
+                "학년",
+            ].tolist()
+            if grade_values:
+                current_grade = str(grade_values[0])
+
+        if current_grade == "미지정" and not selected_roster.empty:
+            current_grade = str(selected_roster.iloc[0]["학년"])
+
+        grade_options = ["미지정"] + GRADES
+        grade_index = (
+            grade_options.index(current_grade)
+            if current_grade in grade_options
+            else 0
+        )
+
+        new_student_grade = st.selectbox(
+            "새 학년",
+            grade_options,
+            index=grade_index,
+            key="student_management_grade",
+        )
+
+        grade_confirm = st.checkbox(
+            "학생 계정과 모든 수강 명단의 학년을 함께 변경합니다.",
+            key="student_management_grade_confirm",
+        )
+
+        if st.button(
+            "학생 학년 변경",
+            key="student_management_grade_button",
+        ):
+            if not grade_confirm:
+                st.warning("학년 변경 확인 항목에 체크해주세요.")
+            else:
+                try:
+                    update_student_grade_everywhere(
+                        selected_student,
+                        new_student_grade,
+                    )
+                    st.success(
+                        f"{selected_student} 학생의 학년을 "
+                        f"{new_student_grade}(으)로 변경했습니다."
+                    )
+                    st.rerun()
+                except Exception as error:
+                    st.error(f"학년 변경 중 오류가 발생했습니다: {error}")
+
+    with tab_roster:
+        if selected_roster.empty:
+            st.info(
+                "이 학생은 학생 명단에 등록된 수강 정보가 없습니다. "
+                "명단 엑셀 업로드로 먼저 등록해주세요."
+            )
+        else:
+            option_map = {}
+
+            for _, row in selected_roster.iterrows():
+                label = (
+                    f"{row['반명']} | {row['담당선생님']} | "
+                    f"{row['학교명']} | {row['학년']} | "
+                    f"{row['매칭교재']} | ID {row['기록ID']}"
+                )
+                option_map[label] = int(row["기록ID"])
+
+            selected_label = st.selectbox(
+                "수정할 수강 등록",
+                list(option_map.keys()),
+                key="student_management_roster_record",
+            )
+
+            selected_record_id = option_map[selected_label]
+            selected_row = selected_roster[
+                selected_roster["기록ID"] == selected_record_id
+            ].iloc[0]
+
+            teacher_options = list(
+                dict.fromkeys(
+                    TEACHERS
+                    + sorted(
+                        roster_df["담당선생님"]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    )
+                )
+            )
+            current_teacher = str(selected_row["담당선생님"])
+            if current_teacher not in teacher_options:
+                teacher_options.append(current_teacher)
+
+            teacher_index = teacher_options.index(current_teacher)
+
+            new_teacher = st.selectbox(
+                "담당 선생님",
+                teacher_options,
+                index=teacher_index,
+                key="student_management_teacher",
+            )
+
+            new_class_name = st.text_input(
+                "반명",
+                value=str(selected_row["반명"]),
+                key="student_management_class",
+            )
+
+            new_school_name = st.text_input(
+                "학교명",
+                value=str(selected_row["학교명"]),
+                key="student_management_school",
+            )
+
+            roster_grade_options = ["미지정"] + GRADES
+            current_roster_grade = str(selected_row["학년"])
+            roster_grade_index = (
+                roster_grade_options.index(current_roster_grade)
+                if current_roster_grade in roster_grade_options
+                else 0
+            )
+
+            new_roster_grade = st.selectbox(
+                "학년",
+                roster_grade_options,
+                index=roster_grade_index,
+                key="student_management_roster_grade",
+            )
+
+            book_options = list(
+                dict.fromkeys(
+                    BOOKS
+                    + sorted(
+                        roster_df["매칭교재"]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    )
+                )
+            )
+            current_book = str(selected_row["매칭교재"])
+            if current_book not in book_options:
+                book_options.append(current_book)
+
+            book_index = book_options.index(current_book)
+
+            new_book = st.selectbox(
+                "교재",
+                book_options,
+                index=book_index,
+                key="student_management_book",
+            )
+
+            roster_confirm = st.checkbox(
+                "선택한 수강 등록 정보를 변경합니다.",
+                key="student_management_roster_confirm",
+            )
+
+            if st.button(
+                "수강 정보 저장",
+                type="primary",
+                key="student_management_roster_button",
+            ):
+                if not roster_confirm:
+                    st.warning("수강 정보 변경 확인 항목에 체크해주세요.")
+                else:
+                    try:
+                        update_roster_record(
+                            selected_record_id,
+                            teacher_name=new_teacher,
+                            class_name=new_class_name,
+                            school_name=new_school_name,
+                            grade=new_roster_grade,
+                            book_name=new_book,
+                        )
+
+                        # users 테이블의 학년도 선택한 학년으로 맞춥니다.
+                        (
+                            supabase.table("users")
+                            .update({"grade": new_roster_grade})
+                            .eq("username", selected_student)
+                            .execute()
+                        )
+
+                        st.success(
+                            f"{selected_student} 학생의 선택한 수강 정보를 변경했습니다."
+                        )
+                        st.rerun()
+                    except Exception as error:
+                        st.error(f"수강 정보 변경 중 오류가 발생했습니다: {error}")
+
+    with tab_delete:
+        st.warning(
+            "삭제는 되돌릴 수 없습니다. 삭제할 범위를 선택한 뒤 "
+            "학생 이름을 정확히 입력해주세요."
+        )
+
+        delete_mode = st.radio(
+            "삭제 범위",
+            [
+                "명단에서만 삭제",
+                "계정만 삭제",
+                "계정·명단·오답 전체 삭제",
+            ],
+            key="student_management_delete_mode",
+        )
+
+        if delete_mode == "명단에서만 삭제":
+            delete_account = False
+            delete_roster = True
+            delete_answers = False
+            st.info("학생 계정과 기존 오답은 유지하고 수강 명단만 삭제합니다.")
+        elif delete_mode == "계정만 삭제":
+            delete_account = True
+            delete_roster = False
+            delete_answers = False
+            st.info(
+                "학생 계정만 삭제합니다. DB 외래키 설정에 따라 오답이 함께 "
+                "삭제될 수 있으므로 전체 삭제가 필요한 경우 아래 옵션을 권장합니다."
+            )
+        else:
+            delete_account = True
+            delete_roster = True
+            delete_answers = True
+            st.error("학생 계정, 모든 수강 명단, 모든 오답 기록을 삭제합니다.")
+
+        delete_confirmation = st.text_input(
+            f"삭제하려면 '{selected_student}'을(를) 그대로 입력하세요.",
+            key="student_management_delete_confirmation",
+        )
+
+        if st.button(
+            "선택한 범위 삭제",
+            type="primary",
+            key="student_management_delete_button",
+        ):
+            if delete_confirmation != selected_student:
+                st.warning("입력한 학생 이름이 일치하지 않습니다.")
+            else:
+                try:
+                    delete_student_management(
+                        selected_student,
+                        delete_user_account=delete_account,
+                        delete_roster=delete_roster,
+                        delete_answers=delete_answers,
+                    )
+                    st.success(
+                        f"{selected_student} 학생의 선택한 정보를 삭제했습니다."
+                    )
+                    st.rerun()
+                except Exception as error:
+                    st.error(f"학생 삭제 중 오류가 발생했습니다: {error}")
+
+
 def normalize_excel_datetime(value) -> str:
     if pd.isna(value) or str(value).strip() == "":
         return now_kst_iso()
@@ -2439,93 +2976,17 @@ def show_superadmin():
 
                 st.divider()
 
-                st.subheader("🏫 학생 학년 수정")
 
-                grade_student = st.selectbox(
-                    "학년을 수정할 학생",
-                    users_df["학생"].tolist(),
-                    key="grade_student"
-                )
 
-                current_grade_values = users_df.loc[
-                    users_df["학생"] == grade_student,
-                    "학년"
-                ].tolist()
 
-                current_grade = current_grade_values[0] if current_grade_values else "미지정"
+        st.divider()
 
-                grade_options = ["미지정"] + GRADES
-
-                if current_grade in grade_options:
-                    current_index = grade_options.index(current_grade)
-                else:
-                    current_index = 0
-
-                new_grade = st.selectbox(
-                    "새 학년",
-                    grade_options,
-                    index=current_index,
-                    key="new_grade"
-                )
-
-                if st.button("학년 수정"):
-                    update_user_grade(grade_student, new_grade)
-                    st.success(f"{grade_student} 학생의 학년이 {new_grade}(으)로 변경되었습니다.")
-                    st.rerun()
-
-                st.divider()
-
-                st.subheader("🔑 학생 비밀번호 초기화")
-
-                reset_student = st.selectbox(
-                    "비밀번호를 초기화할 학생",
-                    users_df["학생"].tolist(),
-                    key="reset_student"
-                )
-
-                new_pw = st.text_input(
-                    "새 비밀번호",
-                    type="password",
-                    key="new_student_password",
-                    placeholder="새 비밀번호를 입력하세요."
-                )
-
-                if st.button("비밀번호 초기화"):
-                    if not new_pw.strip():
-                        st.warning("새 비밀번호를 입력해주세요.")
-                    else:
-                        reset_user_password(reset_student, new_pw.strip())
-                        st.success(f"{reset_student} 학생의 비밀번호가 변경되었습니다.")
-
-                st.divider()
-
-                st.subheader("🗑️ 학생 계정 삭제")
-
-                delete_student = st.selectbox(
-                    "삭제할 학생",
-                    users_df["학생"].tolist(),
-                    key="delete_student"
-                )
-
-                delete_answers_too = st.checkbox(
-                    "계정 삭제 시 해당 학생의 오답 기록도 함께 삭제됩니다.",
-                    value=True,
-                    disabled=True
-                )
-
-                confirm_delete = st.text_input(
-                    "삭제하려면 학생 이름을 그대로 입력하세요.",
-                    key="confirm_delete_student"
-                )
-
-                if st.button("학생 삭제"):
-                    if confirm_delete != delete_student:
-                        st.warning("학생 이름이 일치하지 않습니다.")
-                    else:
-                        delete_user(delete_student, delete_answers_too)
-                        st.success(f"{delete_student} 학생 계정이 삭제되었습니다.")
-                        st.rerun()
-
+        with st.expander("🧑‍🎓 학생 통합 관리", expanded=False):
+            st.info(
+                "학생 이름, 담당 선생님, 반, 학교, 학년, 교재를 수정하거나 "
+                "학생 계정·명단·오답 기록을 삭제할 수 있습니다."
+            )
+            render_student_management()
 
         st.divider()
 
