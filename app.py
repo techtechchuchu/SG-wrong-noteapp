@@ -1,4 +1,5 @@
 import io
+import base64
 import re
 import hashlib
 from collections import Counter
@@ -110,7 +111,7 @@ def apply_global_style():
         .block-container {
             max-width: 980px;
             padding-top: 2rem;
-            padding-bottom: 11rem;
+            padding-bottom: 8.5rem;
         }
 
         h1, h2, h3 {
@@ -170,38 +171,76 @@ def apply_global_style():
             line-height: 1.65;
         }
 
+        .sg-logo-wrap {
+            width: 100%;
+            min-height: 92px;
+            display: flex;
+            align-items: center;
+            justify-content: flex-start;
+            box-sizing: border-box;
+            padding: 10px 8px 14px 8px;
+            overflow: visible;
+        }
+
+        .sg-logo-wrap img {
+            display: block;
+            width: 320px;
+            max-width: 82vw;
+            height: auto;
+            object-fit: contain;
+        }
+
         .sg-footer {
             position: fixed;
             left: 50%;
             bottom: 0;
             transform: translateX(-50%);
-            z-index: 999;
+            z-index: 9999;
             width: min(980px, calc(100% - 2rem));
             box-sizing: border-box;
-            padding: 12px 16px 14px;
-            border-top: 1px solid #e7ebf0;
-            background: rgba(255, 255, 255, 0.96);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 6px 12px;
+            padding: 9px 14px 10px;
+            border: 1px solid #e7ebf0;
+            border-bottom: 0;
+            border-radius: 14px 14px 0 0;
+            background: rgba(255, 255, 255, 0.98);
             backdrop-filter: blur(8px);
             text-align: center;
-            color: #8791a2;
-            font-size: 13px;
-            line-height: 1.55;
-            box-shadow: 0 -4px 14px rgba(31, 41, 55, 0.04);
+            color: #7d8798;
+            font-size: 12px;
+            line-height: 1.4;
+            box-shadow: 0 -5px 18px rgba(31, 41, 55, 0.07);
+        }
+
+        .sg-footer-text {
+            display: flex;
+            flex-direction: column;
+            gap: 1px;
+        }
+
+        .sg-footer-credit {
+            white-space: nowrap;
         }
 
         .sg-contact-button {
             display: inline-flex;
             align-items: center;
             justify-content: center;
-            gap: 6px;
-            margin-top: 8px;
-            padding: 8px 14px;
-            border-radius: 10px;
+            min-height: 34px;
+            padding: 6px 13px;
+            border: 1px solid #e3cd00;
+            border-radius: 9px;
             background: #fee500;
             color: #191919 !important;
             text-decoration: none !important;
+            font-size: 13px;
             font-weight: 800;
-            border: 1px solid #e5cf00;
+            line-height: 1;
+            white-space: nowrap;
             transition: transform 0.15s ease, box-shadow 0.15s ease;
         }
 
@@ -340,13 +379,34 @@ def apply_global_style():
                 padding-left: 1rem;
                 padding-right: 1rem;
                 padding-top: 1rem;
-                padding-bottom: 12rem;
+                padding-bottom: 9rem;
+            }
+
+            .sg-logo-wrap {
+                min-height: 76px;
+                padding: 8px 2px 10px;
+            }
+
+            .sg-logo-wrap img {
+                width: 285px;
+                max-width: 90vw;
             }
 
             .sg-footer {
-                width: calc(100% - 1rem);
-                padding: 10px 12px 12px;
+                width: calc(100% - 0.75rem);
+                gap: 5px 8px;
+                padding: 8px 9px 9px;
+                font-size: 10.5px;
+            }
+
+            .sg-contact-button {
+                min-height: 32px;
+                padding: 6px 11px;
                 font-size: 12px;
+            }
+
+            .sg-footer-credit {
+                width: 100%;
             }
 
             .sg-notice-card {
@@ -413,35 +473,42 @@ def apply_global_style():
 
 # ---------------------- 배너 ----------------------
 def show_banner():
-    """SG고등관 로고만 여유 있게 표시합니다."""
-    if BANNER_PATH.exists():
-        st.image(str(BANNER_PATH), width=340)
+    """SG고등관 로고가 잘리지 않도록 여백을 포함해 표시합니다."""
+    if not BANNER_PATH.exists():
+        return
+
+    image_base64 = base64.b64encode(BANNER_PATH.read_bytes()).decode("utf-8")
+    image_suffix = BANNER_PATH.suffix.lower().lstrip(".") or "png"
+    image_mime = "jpeg" if image_suffix in {"jpg", "jpeg"} else image_suffix
+
+    logo_html = (
+        '<div class="sg-logo-wrap">'
+        f'<img src="data:image/{image_mime};base64,{image_base64}" '
+        'alt="SG고등관 로고">'
+        '</div>'
+    )
+    st.markdown(logo_html, unsafe_allow_html=True)
 
 
 def show_global_footer():
-    """모든 화면 하단에 고정으로 표시되는 안내 문구입니다."""
-    st.markdown(
-        """
-        <div class="sg-footer">
-            <div>SG고등관 재원생 및 직원 전용 학습관리 시스템입니다.</div>
-            <div>계정 공유 및 타인의 계정 사용을 금지합니다.</div>
-
-            <a
-                class="sg-contact-button"
-                href="https://open.kakao.com/o/sBOsAMFi"
-                target="_blank"
-                rel="noopener noreferrer"
-            >
-                💬 오픈채팅 문의
-            </a>
-
-            <div style="margin-top: 7px;">
-                © 2026 techtechchu · Developed for SG고등관
-            </div>
-        </div>
-        """,
-        unsafe_allow_html=True
+    """모든 화면 하단에 안내 및 카카오 오픈채팅 버튼을 고정 표시합니다."""
+    footer_html = (
+        '<div class="sg-footer">'
+        '<div class="sg-footer-text">'
+        '<span>SG고등관 재원생 및 직원 전용 학습관리 시스템입니다.</span>'
+        '<span>계정 공유 및 타인의 계정 사용을 금지합니다.</span>'
+        '</div>'
+        '<a class="sg-contact-button" '
+        'href="https://open.kakao.com/o/sBOsAMFi" '
+        'target="_blank" rel="noopener noreferrer">'
+        '💬 오픈채팅 문의'
+        '</a>'
+        '<div class="sg-footer-credit">'
+        '© 2026 techtechchu · Developed for SG고등관'
+        '</div>'
+        '</div>'
     )
+    st.markdown(footer_html, unsafe_allow_html=True)
 
 
 # ---------------------- Supabase 연결 ----------------------
