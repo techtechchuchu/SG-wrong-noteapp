@@ -1491,8 +1491,16 @@ def username_exists(username: str, exclude_username: str | None = None) -> bool:
 
 def rename_student_everywhere(old_name: str, new_name: str) -> dict:
     """
-    학생 이름을 users, wrong_answers, student_roster에서 함께 변경합니다.
-    기존 오답과 명단 연결이 끊기지 않도록 세 테이블을 같은 이름으로 맞춥니다.
+    외래키 제약을 안전하게 지키면서 학생 이름을 변경합니다.
+
+    처리 순서:
+    1. 기존 users 계정 정보를 읽음
+    2. 새 이름의 users 계정을 먼저 생성
+    3. wrong_answers와 student_roster를 새 이름으로 변경
+    4. 기존 users 계정 삭제
+
+    users.username을 먼저 수정하면 wrong_answers 외래키 때문에
+    PostgreSQL 오류 23503이 발생하므로 이 순서를 사용합니다.
     """
     old_name = str(old_name or "").strip()
     new_name = str(new_name or "").strip()
@@ -1503,54 +1511,119 @@ def rename_student_everywhere(old_name: str, new_name: str) -> dict:
     if old_name == new_name:
         raise ValueError("현재 이름과 새 이름이 같습니다.")
 
-    if username_exists(new_name, exclude_username=old_name):
+    # 새 이름 중복 확인
+    existing_new_user = (
+        supabase.table("users")
+        .select("username")
+        .eq("username", new_name)
+        .limit(1)
+        .execute()
+    )
+    if existing_new_user.data:
         raise ValueError("새 이름으로 이미 가입된 학생 계정이 있습니다.")
 
-    roster_duplicate = (
+    existing_new_roster = (
         supabase.table("student_roster")
         .select("id")
         .eq("student_name", new_name)
         .limit(1)
         .execute()
     )
-
-    if roster_duplicate.data:
+    if existing_new_roster.data:
         raise ValueError(
             "새 이름과 동일한 학생이 명단에 이미 있습니다. "
             "동명이인이라면 이름 뒤에 숫자 등을 붙여 구분해주세요."
         )
 
-    updated = {
-        "users": 0,
-        "wrong_answers": 0,
-        "student_roster": 0,
-    }
-
-    user_response = (
+    # 기존 계정 정보 읽기
+    old_user_response = (
         supabase.table("users")
-        .update({"username": new_name})
+        .select("username,password_hash,grade,temp_password,created_at")
         .eq("username", old_name)
+        .limit(1)
         .execute()
     )
-    updated["users"] = len(user_response.data or [])
 
-    answer_response = (
-        supabase.table("wrong_answers")
-        .update({"username": new_name})
-        .eq("username", old_name)
-        .execute()
-    )
-    updated["wrong_answers"] = len(answer_response.data or [])
+    old_user = old_user_response.data[0] if old_user_response.data else None
 
-    roster_response = (
-        supabase.table("student_roster")
-        .update({"student_name": new_name})
-        .eq("student_name", old_name)
-        .execute()
-    )
-    updated["student_roster"] = len(roster_response.data or [])
+    # 계정이 없는 학생도 명단/오답 이름 수정은 가능하게 처리
+    new_user_created = False
 
-    return updated
+    try:
+        # 1) 새 부모(users) 행을 먼저 생성
+        if old_user:
+            new_user_payload = {
+                "username": new_name,
+                "password_hash": old_user.get("password_hash", ""),
+                "grade": old_user.get("grade") or "미지정",
+                "temp_password": old_user.get("temp_password") or "",
+                "created_at": old_user.get("created_at") or now_kst_iso(),
+            }
+
+            (
+                supabase.table("users")
+                .insert(new_user_payload)
+                .execute()
+            )
+            new_user_created = True
+
+        # 2) 자식 테이블을 새 이름으로 이동
+        answer_response = (
+            supabase.table("wrong_answers")
+            .update({"username": new_name})
+            .eq("username", old_name)
+            .execute()
+        )
+
+        roster_response = (
+            supabase.table("student_roster")
+            .update({"student_name": new_name})
+            .eq("student_name", old_name)
+            .execute()
+        )
+
+        # 3) 기존 부모(users) 행 삭제
+        deleted_users = 0
+        if old_user:
+            delete_response = (
+                supabase.table("users")
+                .delete()
+                .eq("username", old_name)
+                .execute()
+            )
+            deleted_users = len(delete_response.data or [])
+
+        return {
+            "users_created": 1 if new_user_created else 0,
+            "users_deleted": deleted_users,
+            "wrong_answers": len(answer_response.data or []),
+            "student_roster": len(roster_response.data or []),
+        }
+
+    except Exception:
+        # 중간 실패 시 새 계정만 생성된 상태라면 가능한 범위에서 롤백
+        # 자식 데이터가 이미 새 이름으로 이동한 경우에는 새 계정을 지우면
+        # 다시 외래키 오류가 발생할 수 있으므로 현재 상태를 보존합니다.
+        try:
+            moved_answer_check = (
+                supabase.table("wrong_answers")
+                .select("id")
+                .eq("username", new_name)
+                .limit(1)
+                .execute()
+            )
+
+            if new_user_created and not moved_answer_check.data:
+                (
+                    supabase.table("users")
+                    .delete()
+                    .eq("username", new_name)
+                    .execute()
+                )
+        except Exception:
+            pass
+
+        raise
 
 
 def update_roster_record(
