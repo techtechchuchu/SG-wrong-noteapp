@@ -499,7 +499,7 @@ def show_global_footer():
         '<span>계정 공유 및 타인의 계정 사용을 금지합니다.</span>'
         '</div>'
         '<a class="sg-contact-button" '
-        'https://open.kakao.com/o/sLgsIMFi" '
+        'href="https://open.kakao.com/o/sLgsIMFi" '
         'target="_blank" rel="noopener noreferrer">'
         '💬 오픈채팅 문의'
         '</a>'
