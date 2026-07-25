@@ -34,6 +34,7 @@ BOOKS = [
 
 
 TEACHERS = ["이주백.T", "박병민.T", "노대근.T"]
+ALL_TEACHER_ADMIN = "전체 관리자"
 
 ROSTER_REQUIRED_COLUMNS = {
     "반명",
@@ -2397,7 +2398,7 @@ def show_admin():
 
         selected_teacher_login = st.selectbox(
             "담당 선생님",
-            TEACHERS,
+            TEACHERS + [ALL_TEACHER_ADMIN],
             key="teacher_login_name"
         )
 
@@ -2408,14 +2409,24 @@ def show_admin():
         )
 
         if st.button("로그인", key="teacher_login_button"):
-            if ADMIN_PASSWORD is None:
-                st.error("선생님 비밀번호가 설정되지 않았습니다.")
-            elif pw == ADMIN_PASSWORD:
-                st.session_state.is_admin = True
-                st.session_state.teacher_name = selected_teacher_login
-                st.rerun()
+            if selected_teacher_login == ALL_TEACHER_ADMIN:
+                if SUPERADMIN_PASSWORD is None:
+                    st.error("전체 관리자 비밀번호가 설정되지 않았습니다.")
+                elif pw == SUPERADMIN_PASSWORD:
+                    st.session_state.is_admin = True
+                    st.session_state.teacher_name = ALL_TEACHER_ADMIN
+                    st.rerun()
+                else:
+                    st.error("전체 관리자 비밀번호가 올바르지 않습니다.")
             else:
-                st.error("비밀번호가 틀렸습니다.")
+                if ADMIN_PASSWORD is None:
+                    st.error("선생님 비밀번호가 설정되지 않았습니다.")
+                elif pw == ADMIN_PASSWORD:
+                    st.session_state.is_admin = True
+                    st.session_state.teacher_name = selected_teacher_login
+                    st.rerun()
+                else:
+                    st.error("비밀번호가 틀렸습니다.")
 
         st.divider()
 
@@ -2445,6 +2456,9 @@ def show_admin():
         if not current_teacher:
             st.warning("로그인한 선생님 정보가 없습니다. 로그아웃 후 다시 로그인해주세요.")
             df = pd.DataFrame()
+        elif current_teacher == ALL_TEACHER_ADMIN:
+            # 전체 관리자는 모든 학생의 오답 기록을 확인합니다.
+            df = merge_wrong_answers_by_day(df)
         elif roster.empty:
             st.info("등록된 학생 명단이 없습니다.")
             df = pd.DataFrame()
@@ -2502,7 +2516,16 @@ def show_admin():
             if book_filter != "전체":
                 display_df = display_df[display_df["교재"] == book_filter]
 
-            st.caption(f"{current_teacher} 담당 학생의 기록만 표시되며, 같은 날짜·교재의 입력은 한 줄로 합쳐집니다.")
+            if current_teacher == ALL_TEACHER_ADMIN:
+                st.caption(
+                    "전체 학생의 오답 기록이 표시되며, "
+                    "같은 날짜·교재의 입력은 한 줄로 합쳐집니다."
+                )
+            else:
+                st.caption(
+                    f"{current_teacher} 담당 학생의 기록만 표시되며, "
+                    "같은 날짜·교재의 입력은 한 줄로 합쳐집니다."
+                )
             st.write(f"총 {len(display_df)}건")
             st.dataframe(
                 display_df,
@@ -2514,7 +2537,7 @@ def show_admin():
             st.download_button(
                 "엑셀로 다운로드",
                 data=dataframe_to_excel_bytes(display_df),
-                file_name=f"{current_teacher}_전체오답현황.xlsx",
+                file_name=("전체관리자_전체오답현황.xlsx" if current_teacher == ALL_TEACHER_ADMIN else f"{current_teacher}_전체오답현황.xlsx"),
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="download_all_answers",
             )
@@ -2553,23 +2576,35 @@ def show_admin():
                 "등록된 학생 명단이 없습니다. 관리자 화면에서 최종 명단 엑셀을 먼저 업로드해주세요."
             )
         else:
-            teacher_df = status_df[
-                status_df["담당선생님"] == current_teacher
-            ].copy()
+            if current_teacher == ALL_TEACHER_ADMIN:
+                teacher_df = status_df.copy()
+                section_title = "전체 선생님 담당 반"
+            else:
+                teacher_df = status_df[
+                    status_df["담당선생님"] == current_teacher
+                ].copy()
+                section_title = f"{current_teacher} 담당 반"
 
             if teacher_df.empty:
-                st.info(f"{current_teacher} 선생님에게 등록된 반 또는 학생이 없습니다.")
+                st.info("등록된 반 또는 학생이 없습니다.")
             else:
-                st.markdown(f"### {current_teacher} 담당 반")
+                st.markdown(f"### {section_title}")
                 st.caption("반 이름을 눌러 각 반의 학생 현황을 따로 확인할 수 있습니다.")
 
-                class_names = sorted(
-                    teacher_df["반명"]
-                    .dropna()
-                    .astype(str)
-                    .unique()
-                    .tolist()
-                )
+                if current_teacher == ALL_TEACHER_ADMIN:
+                    teacher_df["관리용반명"] = (
+                        teacher_df["담당선생님"].astype(str)
+                        + " · "
+                        + teacher_df["반명"].astype(str)
+                    )
+                    class_names = sorted(
+                        teacher_df["관리용반명"].dropna().unique().tolist()
+                    )
+                else:
+                    teacher_df["관리용반명"] = teacher_df["반명"].astype(str)
+                    class_names = sorted(
+                        teacher_df["관리용반명"].dropna().unique().tolist()
+                    )
 
                 tab_labels = ["전체"] + class_names
                 class_tabs = st.tabs(tab_labels)
@@ -2633,7 +2668,7 @@ def show_admin():
                             tab_df = teacher_df.copy()
                         else:
                             tab_df = teacher_df[
-                                teacher_df["반명"] == tab_name
+                                teacher_df["관리용반명"] == tab_name
                             ].copy()
 
                         render_class_status(
@@ -2651,12 +2686,25 @@ def show_admin():
             )
         else:
             current_teacher = st.session_state.teacher_name
-            teacher_roster = roster[
-                roster["담당선생님"] == current_teacher
-            ].copy()
 
-            selected_teacher = current_teacher
-            st.markdown(f"**담당 선생님:** {selected_teacher}")
+            if current_teacher == ALL_TEACHER_ADMIN:
+                teacher_options = sorted(
+                    roster["담당선생님"].dropna().astype(str).unique().tolist()
+                )
+                selected_teacher = st.selectbox(
+                    "1. 담당 선생님",
+                    teacher_options,
+                    key="paper_admin_teacher",
+                )
+                teacher_roster = roster[
+                    roster["담당선생님"] == selected_teacher
+                ].copy()
+            else:
+                teacher_roster = roster[
+                    roster["담당선생님"] == current_teacher
+                ].copy()
+                selected_teacher = current_teacher
+                st.markdown(f"**담당 선생님:** {selected_teacher}")
 
             class_options = sorted(
                 teacher_roster["반명"].dropna().unique().tolist()
