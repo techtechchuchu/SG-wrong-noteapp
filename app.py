@@ -1320,6 +1320,61 @@ def get_all_wrong_answers() -> pd.DataFrame:
     return pd.DataFrame(records)
 
 
+def merge_wrong_answers_by_day(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    같은 학생이 같은 날짜에 같은 교재로 여러 번 입력한 오답 기록을 한 줄로 합칩니다.
+    문제번호는 중복 없이 입력 순서대로 합치고, 비고도 중복 문구를 제거해 합칩니다.
+    """
+    output_columns = ["학생", "학년", "교재", "문제번호", "비고", "작성일시"]
+
+    if df.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    working = df.copy()
+    working["작성일시"] = working["작성일시"].fillna("").astype(str)
+    working["작성날짜"] = working["작성일시"].str.slice(0, 10)
+
+    # 날짜 형식이 없는 예외 데이터는 기존 작성일시를 사용합니다.
+    working.loc[
+        working["작성날짜"].str.len() != 10,
+        "작성날짜"
+    ] = working["작성일시"]
+
+    merged_records = []
+
+    grouped = working.groupby(
+        ["학생", "학년", "교재", "작성날짜"],
+        sort=False,
+        dropna=False,
+    )
+
+    for (student, grade, book, created_date), group in grouped:
+        merged_numbers = []
+        merged_memos = []
+
+        for _, row in group.iterrows():
+            for number in parse_problem_numbers(row.get("문제번호", "")):
+                if number not in merged_numbers:
+                    merged_numbers.append(number)
+
+            memo = str(row.get("비고", "") or "").strip()
+            if memo and memo.lower() != "nan" and memo not in merged_memos:
+                merged_memos.append(memo)
+
+        merged_records.append(
+            {
+                "학생": student,
+                "학년": grade,
+                "교재": book,
+                "문제번호": format_problem_numbers(merged_numbers),
+                "비고": " / ".join(merged_memos),
+                "작성일시": created_date,
+            }
+        )
+
+    return pd.DataFrame(merged_records, columns=output_columns)
+
+
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
 
@@ -1870,6 +1925,9 @@ def show_admin():
                 how="inner"
             ).drop(columns=["학생명", "매칭교재"])
 
+            # 같은 학생이 같은 날 같은 교재에 여러 번 입력한 기록은 한 줄로 통합합니다.
+            df = merge_wrong_answers_by_day(df)
+
         if df.empty:
             st.info(f"{current_teacher or '해당 선생님'} 담당 학생의 오답 기록이 없습니다.")
         else:
@@ -1907,7 +1965,7 @@ def show_admin():
             if book_filter != "전체":
                 display_df = display_df[display_df["교재"] == book_filter]
 
-            st.caption(f"{current_teacher} 담당 학생의 오답 기록만 표시됩니다.")
+            st.caption(f"{current_teacher} 담당 학생의 기록만 표시되며, 같은 날짜·교재의 입력은 한 줄로 합쳐집니다.")
             st.write(f"총 {len(display_df)}건")
             st.dataframe(
                 display_df,
@@ -1923,9 +1981,6 @@ def show_admin():
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 key="download_all_answers",
             )
-
-            with st.expander("✏️ 잘못 선택한 교재 수정", expanded=False):
-                render_wrong_answer_book_editor("teacher")
 
             with st.expander("🧩 변형문제 필요 학생", expanded=False):
                 variant_df = display_df[
@@ -1969,56 +2024,86 @@ def show_admin():
                 st.info(f"{current_teacher} 선생님에게 등록된 반 또는 학생이 없습니다.")
             else:
                 st.markdown(f"### {current_teacher} 담당 반")
+                st.caption("반 이름을 눌러 각 반의 학생 현황을 따로 확인할 수 있습니다.")
 
-                class_options = ["전체"] + sorted(
-                    teacher_df["반명"].dropna().astype(str).unique().tolist()
+                class_names = sorted(
+                    teacher_df["반명"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
                 )
 
-                selected_class = st.selectbox(
-                    "내 반 선택",
-                    class_options,
-                    key="my_class_filter",
-                )
+                tab_labels = ["전체"] + class_names
+                class_tabs = st.tabs(tab_labels)
 
-                if selected_class != "전체":
-                    teacher_df = teacher_df[
-                        teacher_df["반명"] == selected_class
-                    ].copy()
+                def render_class_status(
+                    class_df: pd.DataFrame,
+                    tab_name: str,
+                    tab_index: int
+                ):
+                    unique_students = class_df["학생명"].nunique()
+                    completed_students = class_df.loc[
+                        class_df["작성여부"] == "O", "학생명"
+                    ].nunique()
+                    incomplete_students = max(
+                        unique_students - completed_students,
+                        0
+                    )
 
-                unique_students = teacher_df["학생명"].nunique()
-                completed_students = teacher_df.loc[
-                    teacher_df["작성여부"] == "O", "학생명"
-                ].nunique()
-                incomplete_students = max(
-                    unique_students - completed_students,
-                    0
-                )
+                    col1, col2, col3, col4 = st.columns(4)
+                    col1.metric("고유 학생", unique_students)
+                    col2.metric("수강 등록", len(class_df))
+                    col3.metric("작성 학생", completed_students)
+                    col4.metric("미작성 학생", incomplete_students)
 
-                col1, col2, col3, col4 = st.columns(4)
-                col1.metric("고유 학생", unique_students)
-                col2.metric("수강 등록", len(teacher_df))
-                col3.metric("작성 학생", completed_students)
-                col4.metric("미작성 학생", incomplete_students)
+                    display_columns = [
+                        "반명", "학생명", "학교명", "학년",
+                        "매칭교재", "작성여부", "작성문제수", "최근작성일시"
+                    ]
 
-                display_columns = [
-                    "반명", "학생명", "학교명", "학년",
-                    "매칭교재", "작성여부", "작성문제수", "최근작성일시"
-                ]
+                    st.dataframe(
+                        class_df[display_columns],
+                        use_container_width=True,
+                        hide_index=True,
+                        height=520,
+                    )
 
-                st.dataframe(
-                    teacher_df[display_columns],
-                    use_container_width=True,
-                    hide_index=True,
-                    height=520,
-                )
+                    safe_tab_name = re.sub(
+                        r"[^0-9A-Za-z가-힣_-]+",
+                        "_",
+                        tab_name
+                    )
 
-                st.download_button(
-                    "내 반 학생 현황 엑셀 다운로드",
-                    data=dataframe_to_excel_bytes(teacher_df),
-                    file_name=f"{current_teacher}_내반_학생현황.xlsx",
-                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                    key="download_my_class_status",
-                )
+                    st.download_button(
+                        f"{tab_name} 학생 현황 엑셀 다운로드",
+                        data=dataframe_to_excel_bytes(class_df),
+                        file_name=(
+                            f"{current_teacher}_{safe_tab_name}_학생현황.xlsx"
+                        ),
+                        mime=(
+                            "application/vnd.openxmlformats-officedocument."
+                            "spreadsheetml.sheet"
+                        ),
+                        key=f"download_class_status_{tab_index}",
+                    )
+
+                for tab_index, (tab, tab_name) in enumerate(
+                    zip(class_tabs, tab_labels)
+                ):
+                    with tab:
+                        if tab_name == "전체":
+                            tab_df = teacher_df.copy()
+                        else:
+                            tab_df = teacher_df[
+                                teacher_df["반명"] == tab_name
+                            ].copy()
+
+                        render_class_status(
+                            tab_df,
+                            tab_name,
+                            tab_index
+                        )
 
     with tab_paper:
         roster = get_roster_df()
