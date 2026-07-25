@@ -528,6 +528,7 @@ def verify_supabase_connection():
         ("users", "username"),
         ("wrong_answers", "id"),
         ("student_roster", "id"),
+        ("print_status", "id"),
     ]
 
     for table_name, column_name in checks:
@@ -1374,6 +1375,324 @@ def merge_wrong_answers_by_day(df: pd.DataFrame) -> pd.DataFrame:
         )
 
     return pd.DataFrame(merged_records, columns=output_columns)
+
+
+
+def get_print_status_rows(
+    teacher_name: str | None = None
+) -> pd.DataFrame:
+    """출력 관리 상태를 조회합니다."""
+    filters = []
+
+    if teacher_name and teacher_name != ALL_TEACHER_ADMIN:
+        filters.append(("teacher_name", "eq", teacher_name))
+
+    rows = fetch_all_rows(
+        "print_status",
+        (
+            "id,teacher_name,class_name,student_name,book_name,"
+            "month,week,is_printed,printed_at,memo,created_at"
+        ),
+        filters=filters,
+        order_column="id",
+        desc=True,
+    )
+
+    columns = [
+        "기록ID", "담당선생님", "반명", "학생명", "교재",
+        "월", "주차", "출력완료", "출력일시", "메모", "등록일시"
+    ]
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(
+        [
+            {
+                "기록ID": row.get("id"),
+                "담당선생님": row.get("teacher_name", ""),
+                "반명": row.get("class_name", ""),
+                "학생명": row.get("student_name", ""),
+                "교재": row.get("book_name", ""),
+                "월": row.get("month"),
+                "주차": row.get("week"),
+                "출력완료": bool(row.get("is_printed", False)),
+                "출력일시": row.get("printed_at", ""),
+                "메모": row.get("memo", ""),
+                "등록일시": row.get("created_at", ""),
+            }
+            for row in rows
+        ],
+        columns=columns,
+    )
+
+
+def ensure_print_status_records(
+    teacher_name: str,
+    class_name: str,
+    month: int,
+    week: int,
+):
+    """
+    선택한 선생님·반·월·주차의 학생들을 출력 관리 목록에 생성합니다.
+    이미 존재하는 학생은 중복 생성하지 않습니다.
+    """
+    roster = get_roster_df()
+
+    target = roster[
+        (roster["담당선생님"] == teacher_name)
+        & (roster["반명"] == class_name)
+    ].copy()
+
+    if target.empty:
+        return 0
+
+    existing_rows = fetch_all_rows(
+        "print_status",
+        "student_name,book_name",
+        filters=[
+            ("teacher_name", "eq", teacher_name),
+            ("class_name", "eq", class_name),
+            ("month", "eq", int(month)),
+            ("week", "eq", int(week)),
+        ],
+    )
+
+    existing_keys = {
+        (
+            str(row.get("student_name", "")).strip(),
+            str(row.get("book_name", "")).strip(),
+        )
+        for row in existing_rows
+    }
+
+    insert_rows = []
+
+    for _, row in target.iterrows():
+        key = (
+            str(row["학생명"]).strip(),
+            str(row["매칭교재"]).strip(),
+        )
+
+        if key in existing_keys:
+            continue
+
+        insert_rows.append(
+            {
+                "teacher_name": teacher_name,
+                "class_name": class_name,
+                "student_name": row["학생명"],
+                "book_name": row["매칭교재"],
+                "month": int(month),
+                "week": int(week),
+                "is_printed": False,
+                "printed_at": None,
+                "memo": "",
+                "created_at": now_kst_iso(),
+            }
+        )
+
+    if insert_rows:
+        supabase.table("print_status").insert(insert_rows).execute()
+
+    return len(insert_rows)
+
+
+def update_print_status(
+    record_id: int,
+    *,
+    is_printed: bool,
+    memo: str,
+):
+    """출력 완료 여부와 메모를 저장합니다."""
+    payload = {
+        "is_printed": bool(is_printed),
+        "memo": str(memo or "").strip(),
+        "printed_at": now_kst_iso() if is_printed else None,
+    }
+
+    (
+        supabase.table("print_status")
+        .update(payload)
+        .eq("id", int(record_id))
+        .execute()
+    )
+
+
+def delete_print_status_record(record_id: int):
+    (
+        supabase.table("print_status")
+        .delete()
+        .eq("id", int(record_id))
+        .execute()
+    )
+
+
+def render_print_management():
+    """선생님 및 전체 관리자용 출력 관리 화면입니다."""
+    current_teacher = st.session_state.teacher_name
+    roster = get_roster_df()
+
+    if roster.empty:
+        st.info("등록된 학생 명단이 없습니다.")
+        return
+
+    if current_teacher == ALL_TEACHER_ADMIN:
+        teacher_options = sorted(
+            roster["담당선생님"].dropna().astype(str).unique().tolist()
+        )
+        selected_teacher = st.selectbox(
+            "담당 선생님",
+            teacher_options,
+            key="print_manage_teacher",
+        )
+    else:
+        selected_teacher = current_teacher
+        st.markdown(f"**담당 선생님:** {selected_teacher}")
+
+    teacher_roster = roster[
+        roster["담당선생님"] == selected_teacher
+    ].copy()
+
+    if teacher_roster.empty:
+        st.info("담당 학생 명단이 없습니다.")
+        return
+
+    class_options = sorted(
+        teacher_roster["반명"].dropna().astype(str).unique().tolist()
+    )
+
+    selected_class = st.selectbox(
+        "반 선택",
+        class_options,
+        key="print_manage_class",
+    )
+
+    col_month, col_week = st.columns(2)
+
+    with col_month:
+        month = st.selectbox(
+            "월",
+            list(range(1, 13)),
+            index=datetime.now(KST).month - 1,
+            key="print_manage_month",
+        )
+
+    with col_week:
+        week = st.selectbox(
+            "주차",
+            [1, 2, 3, 4, 5],
+            index=min((datetime.now(KST).day - 1) // 7, 4),
+            key="print_manage_week",
+        )
+
+    if st.button(
+        "현재 반 출력 목록 불러오기",
+        type="primary",
+        key="print_manage_load",
+    ):
+        created_count = ensure_print_status_records(
+            selected_teacher,
+            selected_class,
+            month,
+            week,
+        )
+        if created_count:
+            st.success(f"출력 관리 목록에 {created_count}건을 추가했습니다.")
+        else:
+            st.info("이미 출력 관리 목록에 등록된 학생들입니다.")
+        st.rerun()
+
+    status_df = get_print_status_rows(selected_teacher)
+
+    if status_df.empty:
+        st.info("아직 생성된 출력 관리 목록이 없습니다.")
+        return
+
+    display_df = status_df[
+        (status_df["반명"] == selected_class)
+        & (status_df["월"] == int(month))
+        & (status_df["주차"] == int(week))
+    ].copy()
+
+    if display_df.empty:
+        st.info("선택한 반·월·주차에 등록된 출력 목록이 없습니다.")
+        return
+
+    completed = int(display_df["출력완료"].sum())
+    total = len(display_df)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("전체", total)
+    col2.metric("출력 완료", completed)
+    col3.metric("미출력", total - completed)
+
+    st.caption(
+        "학생별 체크박스를 변경한 뒤 저장 버튼을 눌러야 Supabase에 반영됩니다."
+    )
+
+    for _, row in display_df.iterrows():
+        record_id = int(row["기록ID"])
+
+        with st.container(border=True):
+            col_info, col_check = st.columns([4, 1])
+
+            with col_info:
+                st.markdown(
+                    f"**{row['학생명']}** · {row['교재']}"
+                )
+                if row["출력일시"]:
+                    st.caption(f"최근 출력일시: {row['출력일시']}")
+
+            with col_check:
+                checked = st.checkbox(
+                    "출력 완료",
+                    value=bool(row["출력완료"]),
+                    key=f"print_checked_{record_id}",
+                )
+
+            memo = st.text_input(
+                "메모",
+                value=str(row["메모"] or ""),
+                placeholder="예: 재출력 필요, 결석으로 미전달",
+                key=f"print_memo_{record_id}",
+            )
+
+            col_save, col_delete = st.columns([1, 1])
+
+            with col_save:
+                if st.button(
+                    "저장",
+                    key=f"print_save_{record_id}",
+                    use_container_width=True,
+                ):
+                    update_print_status(
+                        record_id,
+                        is_printed=checked,
+                        memo=memo,
+                    )
+                    st.success(f"{row['학생명']} 학생의 출력 상태를 저장했습니다.")
+                    st.rerun()
+
+            with col_delete:
+                if st.button(
+                    "목록 삭제",
+                    key=f"print_delete_{record_id}",
+                    use_container_width=True,
+                ):
+                    delete_print_status_record(record_id)
+                    st.rerun()
+
+    st.download_button(
+        "출력 관리 현황 엑셀 다운로드",
+        data=dataframe_to_excel_bytes(display_df),
+        file_name=(
+            f"{selected_teacher}_{selected_class}_"
+            f"{month}월_{week}주차_출력관리.xlsx"
+        ),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="download_print_status",
+    )
 
 
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
@@ -2513,11 +2832,12 @@ def show_admin():
     st.title("👨‍🏫 선생님 관리")
     st.caption(f"현재 로그인: {st.session_state.teacher_name or '선생님 미지정'}")
 
-    tab_answers, tab_teacher_students, tab_paper = st.tabs(
+    tab_answers, tab_teacher_students, tab_paper, tab_print = st.tabs(
         [
             "📋 전체 오답 현황",
             "🏫 내 반 학생",
             "🧾 오답노트 만들기",
+            "🖨️ 출력 관리",
         ]
     )
 
@@ -2868,6 +3188,9 @@ def show_admin():
                 )
             else:
                 st.warning("오답노트를 만들 학생을 한 명 이상 선택해주세요.")
+
+    with tab_print:
+        render_print_management()
 
     st.divider()
 
