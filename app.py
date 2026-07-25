@@ -1538,6 +1538,9 @@ if "student_user" not in st.session_state:
 if "is_admin" not in st.session_state:
     st.session_state.is_admin = False
 
+if "teacher_name" not in st.session_state:
+    st.session_state.teacher_name = None
+
 
 if "is_superadmin" not in st.session_state:
     st.session_state.is_superadmin = False
@@ -1799,13 +1802,25 @@ def show_admin():
         show_banner()
 
         st.title("👨‍🏫 선생님 로그인")
-        pw = st.text_input("선생님 공용 비밀번호", type="password")
 
-        if st.button("로그인"):
+        selected_teacher_login = st.selectbox(
+            "담당 선생님",
+            TEACHERS,
+            key="teacher_login_name"
+        )
+
+        pw = st.text_input(
+            "선생님 공용 비밀번호",
+            type="password",
+            key="teacher_login_password"
+        )
+
+        if st.button("로그인", key="teacher_login_button"):
             if ADMIN_PASSWORD is None:
                 st.error("선생님 비밀번호가 설정되지 않았습니다.")
             elif pw == ADMIN_PASSWORD:
                 st.session_state.is_admin = True
+                st.session_state.teacher_name = selected_teacher_login
                 st.rerun()
             else:
                 st.error("비밀번호가 틀렸습니다.")
@@ -1820,11 +1835,12 @@ def show_admin():
 
     show_banner()
     st.title("👨‍🏫 선생님 관리")
+    st.caption(f"현재 로그인: {st.session_state.teacher_name or '선생님 미지정'}")
 
     tab_answers, tab_teacher_students, tab_paper = st.tabs(
         [
             "📋 전체 오답 현황",
-            "👥 선생님별 학생",
+            "🏫 내 반 학생",
             "🧾 오답노트 만들기",
         ]
     )
@@ -1908,68 +1924,73 @@ def show_admin():
 
     with tab_teacher_students:
         status_df = get_teacher_student_status_df()
+        current_teacher = st.session_state.teacher_name
 
-        if status_df.empty:
+        if not current_teacher:
+            st.warning("로그인한 선생님 정보가 없습니다. 로그아웃 후 다시 로그인해주세요.")
+        elif status_df.empty:
             st.info(
                 "등록된 학생 명단이 없습니다. 관리자 화면에서 최종 명단 엑셀을 먼저 업로드해주세요."
             )
         else:
-            teacher_options = sorted(
-                status_df["담당선생님"].dropna().unique().tolist()
-            )
-
-            selected_teacher = st.selectbox(
-                "담당 선생님",
-                teacher_options,
-                key="teacher_student_teacher",
-            )
-
             teacher_df = status_df[
-                status_df["담당선생님"] == selected_teacher
+                status_df["담당선생님"] == current_teacher
             ].copy()
 
-            class_options = ["전체"] + sorted(
-                teacher_df["반명"].dropna().unique().tolist()
-            )
+            if teacher_df.empty:
+                st.info(f"{current_teacher} 선생님에게 등록된 반 또는 학생이 없습니다.")
+            else:
+                st.markdown(f"### {current_teacher} 담당 반")
 
-            selected_class = st.selectbox(
-                "반 선택",
-                class_options,
-                key="teacher_student_class",
-            )
+                class_options = ["전체"] + sorted(
+                    teacher_df["반명"].dropna().astype(str).unique().tolist()
+                )
 
-            if selected_class != "전체":
-                teacher_df = teacher_df[
-                    teacher_df["반명"] == selected_class
+                selected_class = st.selectbox(
+                    "내 반 선택",
+                    class_options,
+                    key="my_class_filter",
+                )
+
+                if selected_class != "전체":
+                    teacher_df = teacher_df[
+                        teacher_df["반명"] == selected_class
+                    ].copy()
+
+                unique_students = teacher_df["학생명"].nunique()
+                completed_students = teacher_df.loc[
+                    teacher_df["작성여부"] == "O", "학생명"
+                ].nunique()
+                incomplete_students = max(
+                    unique_students - completed_students,
+                    0
+                )
+
+                col1, col2, col3, col4 = st.columns(4)
+                col1.metric("고유 학생", unique_students)
+                col2.metric("수강 등록", len(teacher_df))
+                col3.metric("작성 학생", completed_students)
+                col4.metric("미작성 학생", incomplete_students)
+
+                display_columns = [
+                    "반명", "학생명", "학교명", "학년",
+                    "매칭교재", "작성여부", "작성문제수", "최근작성일시"
                 ]
 
-            col1, col2, col3 = st.columns(3)
-            total_students = len(teacher_df)
-            completed_students = int((teacher_df["작성여부"] == "O").sum())
-            incomplete_students = total_students - completed_students
+                st.dataframe(
+                    teacher_df[display_columns],
+                    use_container_width=True,
+                    hide_index=True,
+                    height=520,
+                )
 
-            col1.metric("명단 학생", total_students)
-            col2.metric("작성 O", completed_students)
-            col3.metric("미작성 X", incomplete_students)
-
-            st.dataframe(
-                teacher_df[
-                    [
-                        "반명", "학생명", "학교명", "학년",
-                        "매칭교재", "작성여부", "작성문제수", "최근작성일시"
-                    ]
-                ],
-                use_container_width=True,
-                hide_index=True,
-            )
-
-            st.download_button(
-                "선생님별 학생 현황 엑셀 다운로드",
-                data=dataframe_to_excel_bytes(teacher_df),
-                file_name=f"{selected_teacher}_학생현황.xlsx",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_teacher_status",
-            )
+                st.download_button(
+                    "내 반 학생 현황 엑셀 다운로드",
+                    data=dataframe_to_excel_bytes(teacher_df),
+                    file_name=f"{current_teacher}_내반_학생현황.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key="download_my_class_status",
+                )
 
     with tab_paper:
         roster = get_roster_df()
@@ -1979,19 +2000,13 @@ def show_admin():
                 "등록된 학생 명단이 없습니다. 관리자 화면에서 명단 엑셀을 먼저 업로드해주세요."
             )
         else:
-            teacher_options = sorted(
-                roster["담당선생님"].dropna().unique().tolist()
-            )
-
-            selected_teacher = st.selectbox(
-                "1. 담당 선생님",
-                teacher_options,
-                key="paper_teacher",
-            )
-
+            current_teacher = st.session_state.teacher_name
             teacher_roster = roster[
-                roster["담당선생님"] == selected_teacher
-            ]
+                roster["담당선생님"] == current_teacher
+            ].copy()
+
+            selected_teacher = current_teacher
+            st.markdown(f"**담당 선생님:** {selected_teacher}")
 
             class_options = sorted(
                 teacher_roster["반명"].dropna().unique().tolist()
@@ -2087,6 +2102,7 @@ def show_admin():
 
     if st.button("로그아웃", key="teacher_logout"):
         st.session_state.is_admin = False
+        st.session_state.teacher_name = None
         st.session_state.role = None
         st.rerun()
 
