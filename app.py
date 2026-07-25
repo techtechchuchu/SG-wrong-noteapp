@@ -110,7 +110,7 @@ def apply_global_style():
         .block-container {
             max-width: 980px;
             padding-top: 2rem;
-            padding-bottom: 3rem;
+            padding-bottom: 11rem;
         }
 
         h1, h2, h3 {
@@ -171,12 +171,43 @@ def apply_global_style():
         }
 
         .sg-footer {
-            margin-top: 2rem;
-            padding-top: 1.2rem;
+            position: fixed;
+            left: 50%;
+            bottom: 0;
+            transform: translateX(-50%);
+            z-index: 999;
+            width: min(980px, calc(100% - 2rem));
+            box-sizing: border-box;
+            padding: 12px 16px 14px;
             border-top: 1px solid #e7ebf0;
+            background: rgba(255, 255, 255, 0.96);
+            backdrop-filter: blur(8px);
             text-align: center;
             color: #8791a2;
-            font-size: 14px;
+            font-size: 13px;
+            line-height: 1.55;
+            box-shadow: 0 -4px 14px rgba(31, 41, 55, 0.04);
+        }
+
+        .sg-contact-button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+            margin-top: 8px;
+            padding: 8px 14px;
+            border-radius: 10px;
+            background: #fee500;
+            color: #191919 !important;
+            text-decoration: none !important;
+            font-weight: 800;
+            border: 1px solid #e5cf00;
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+
+        .sg-contact-button:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 5px 12px rgba(25, 25, 25, 0.12);
         }
 
         .sg-notice-card {
@@ -309,6 +340,13 @@ def apply_global_style():
                 padding-left: 1rem;
                 padding-right: 1rem;
                 padding-top: 1rem;
+                padding-bottom: 12rem;
+            }
+
+            .sg-footer {
+                width: calc(100% - 1rem);
+                padding: 10px 12px 12px;
+                font-size: 12px;
             }
 
             .sg-notice-card {
@@ -375,9 +413,35 @@ def apply_global_style():
 
 # ---------------------- 배너 ----------------------
 def show_banner():
-    """SG고등관 로고만 표시하고 계정 복구 안내 배너는 표시하지 않습니다."""
+    """SG고등관 로고만 여유 있게 표시합니다."""
     if BANNER_PATH.exists():
-        st.image(str(BANNER_PATH), width=280)
+        st.image(str(BANNER_PATH), width=340)
+
+
+def show_global_footer():
+    """모든 화면 하단에 고정으로 표시되는 안내 문구입니다."""
+    st.markdown(
+        """
+        <div class="sg-footer">
+            <div>SG고등관 재원생 및 직원 전용 학습관리 시스템입니다.</div>
+            <div>계정 공유 및 타인의 계정 사용을 금지합니다.</div>
+
+            <a
+                class="sg-contact-button"
+                href="https://open.kakao.com/o/sBOsAMFi"
+                target="_blank"
+                rel="noopener noreferrer"
+            >
+                💬 오픈채팅 문의
+            </a>
+
+            <div style="margin-top: 7px;">
+                © 2026 techtechchu · Developed for SG고등관
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True
+    )
 
 
 # ---------------------- Supabase 연결 ----------------------
@@ -1461,14 +1525,6 @@ def show_role_select():
             ℹ️ 관리자 기능은 학원 관리자만 이용 가능합니다.<br>
             ℹ️ 비밀번호를 분실한 경우 학원 관리자에게 문의해주세요.
         </div>
-
-        <div class="sg-footer">
-            <div>SG고등관 재원생 및 직원 전용 학습관리 시스템입니다.</div>
-            <div>계정 공유 및 타인의 계정 사용을 금지합니다.</div>
-            <div style="margin-top: 10px;">
-                © 2026 techtechchu · Developed for SG고등관
-            </div>
-        </div>
         """,
         unsafe_allow_html=True
     )
@@ -2299,3 +2355,6 @@ elif st.session_state.role == "admin":
 
 elif st.session_state.role == "superadmin":
     show_superadmin()
+
+# 모든 화면에 하단 고정 안내 표시
+show_global_footer()
