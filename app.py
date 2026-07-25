@@ -375,52 +375,9 @@ def apply_global_style():
 
 # ---------------------- 배너 ----------------------
 def show_banner():
+    """SG고등관 로고만 표시하고 계정 복구 안내 배너는 표시하지 않습니다."""
     if BANNER_PATH.exists():
         st.image(str(BANNER_PATH), width=280)
-
-    banner_html = """
-<div class="sg-notice-card">
-<div class="sg-notice-title">
-<span>📣</span>
-<span>계정 복구 안내</span>
-</div>
-
-<div class="sg-notice-intro">
-학생 계정 복구는 완료되었습니다.<br>
-기존에 사용하던 학생 이름과 아래 임시 비밀번호로 로그인해주세요.
-</div>
-
-<div class="sg-temp-password">
-<span class="sg-lock">🔐</span>
-<span class="sg-temp-label">임시 비밀번호</span>
-<span class="sg-temp-value">sg2026</span>
-</div>
-
-<div class="sg-action-box">
-<div class="sg-action-title">로그인 후 꼭 진행해주세요</div>
-
-<div class="sg-action-item">
-<span class="sg-action-number">1</span>
-<span>임시 비밀번호를 <strong>본인이 사용할 새 비밀번호로 변경</strong></span>
-</div>
-
-<div class="sg-action-item">
-<span class="sg-action-number">2</span>
-<span>주말에 작성했던 <strong>기존 오답번호를 다시 입력</strong></span>
-</div>
-</div>
-
-<div class="sg-notice-foot">
-현재 기존 오답번호 목록은 초기화된 상태입니다.<br>
-본인이 작성했던 개수만큼 빠짐없이 다시 입력해주시기 바랍니다.<br>
-이용에 불편을 드려 죄송합니다.
-</div>
-
-<div class="sg-signature">- SG 고등관 조교 -</div>
-</div>
-""".strip()
-
-    st.html(banner_html)
 
 
 # ---------------------- Supabase 연결 ----------------------
