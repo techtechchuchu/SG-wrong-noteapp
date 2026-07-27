@@ -707,18 +707,8 @@ def get_student_roster_rows(username: str) -> pd.DataFrame:
 
 
 def get_student_allowed_books(username: str) -> list[str]:
-    """학생에게 담당 선생님은 숨기고, 명단에 매칭된 교재만 반환합니다."""
-    student_rows = get_student_roster_rows(username)
-
-    if student_rows.empty:
-        return BOOKS
-
-    books = [
-        book for book in student_rows["매칭교재"].dropna().astype(str).tolist()
-        if book in BOOKS
-    ]
-
-    return list(dict.fromkeys(books)) or BOOKS
+    """학생 명단의 매칭 교재와 관계없이 전체 교재 목록을 반환합니다."""
+    return BOOKS.copy()
 
 
 def get_teacher_student_status_df() -> pd.DataFrame:
@@ -2950,7 +2940,7 @@ def show_student():
         book = st.selectbox(
             "교재 선택",
             allowed_books,
-            help="학생 명단에 매칭된 교재만 표시됩니다."
+            help="등록된 전체 교재 목록에서 자유롭게 선택할 수 있습니다."
         )
 
         problem_number = st.text_input(
