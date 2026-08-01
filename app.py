@@ -3519,6 +3519,112 @@ def show_admin():
 
     st.divider()
 
+    with st.expander("🔑 담당 학생 비밀번호 초기화", expanded=False):
+        current_teacher = st.session_state.teacher_name
+        roster_df = get_roster_df()
+        users_df = get_all_users()
+
+        if users_df.empty:
+            st.info("초기화할 학생 계정이 없습니다.")
+        else:
+            if current_teacher == ALL_TEACHER_ADMIN:
+                allowed_students = sorted(
+                    users_df["학생"]
+                    .dropna()
+                    .astype(str)
+                    .unique()
+                    .tolist()
+                )
+                st.caption(
+                    "전체 관리자는 가입된 모든 학생의 비밀번호를 초기화할 수 있습니다."
+                )
+            else:
+                if roster_df.empty:
+                    allowed_students = []
+                else:
+                    teacher_student_names = set(
+                        roster_df.loc[
+                            roster_df["담당선생님"] == current_teacher,
+                            "학생명",
+                        ]
+                        .dropna()
+                        .astype(str)
+                        .tolist()
+                    )
+
+                    allowed_students = sorted(
+                        users_df.loc[
+                            users_df["학생"].isin(teacher_student_names),
+                            "학생",
+                        ]
+                        .dropna()
+                        .astype(str)
+                        .unique()
+                        .tolist()
+                    )
+
+                st.caption(
+                    f"{current_teacher} 선생님의 담당 학생 계정만 표시됩니다."
+                )
+
+            if not allowed_students:
+                st.info("현재 비밀번호를 초기화할 수 있는 담당 학생 계정이 없습니다.")
+            else:
+                selected_reset_student = st.selectbox(
+                    "학생 선택",
+                    allowed_students,
+                    key="teacher_reset_password_student",
+                )
+
+                new_reset_password = st.text_input(
+                    "새 임시 비밀번호",
+                    type="password",
+                    placeholder="4자 이상 입력",
+                    key="teacher_reset_password_new",
+                )
+
+                confirm_reset_password = st.text_input(
+                    "새 임시 비밀번호 확인",
+                    type="password",
+                    placeholder="동일한 비밀번호를 다시 입력",
+                    key="teacher_reset_password_confirm",
+                )
+
+                reset_password_check = st.checkbox(
+                    f"{selected_reset_student} 학생의 기존 비밀번호를 초기화합니다.",
+                    key="teacher_reset_password_check",
+                )
+
+                if st.button(
+                    "담당 학생 비밀번호 초기화",
+                    type="primary",
+                    key="teacher_reset_password_button",
+                    use_container_width=True,
+                ):
+                    if len(new_reset_password.strip()) < 4:
+                        st.warning("새 임시 비밀번호는 4자 이상 입력해주세요.")
+                    elif new_reset_password != confirm_reset_password:
+                        st.warning("새 임시 비밀번호가 서로 일치하지 않습니다.")
+                    elif not reset_password_check:
+                        st.warning("비밀번호 초기화 확인 항목에 체크해주세요.")
+                    else:
+                        try:
+                            reset_user_password(
+                                selected_reset_student,
+                                new_reset_password.strip(),
+                            )
+                            st.success(
+                                f"{selected_reset_student} 학생의 비밀번호를 "
+                                "새 임시 비밀번호로 초기화했습니다."
+                            )
+                            st.rerun()
+                        except Exception as error:
+                            st.error(
+                                f"비밀번호 초기화 중 오류가 발생했습니다: {error}"
+                            )
+
+    st.divider()
+
     if st.button("로그아웃", key="teacher_logout"):
         st.session_state.is_admin = False
         st.session_state.teacher_name = None
