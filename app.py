@@ -172,6 +172,33 @@ def apply_global_style():
             line-height: 1.65;
         }
 
+        .sg-account-notice {
+            width: 100%;
+            box-sizing: border-box;
+            margin: 2px 0 22px;
+            padding: 16px 18px;
+            border: 1px solid #cfe3fb;
+            border-left: 5px solid #2878c8;
+            border-radius: 13px;
+            background: linear-gradient(135deg, #f5faff 0%, #edf6ff 100%);
+            color: #2e4f6d;
+            line-height: 1.7;
+            box-shadow: 0 5px 16px rgba(40, 120, 200, 0.07);
+        }
+
+        .sg-account-notice-title {
+            margin-bottom: 6px;
+            color: #15599d;
+            font-size: 17px;
+            font-weight: 850;
+        }
+
+        .sg-account-notice-text {
+            font-size: 14px;
+            word-break: keep-all;
+            overflow-wrap: anywhere;
+        }
+
         .sg-logo-wrap {
             width: 100%;
             min-height: 92px;
@@ -489,6 +516,23 @@ def show_banner():
         '</div>'
     )
     st.markdown(logo_html, unsafe_allow_html=True)
+
+
+
+def show_account_notice():
+    """역할 선택 및 로그인 화면에 계정 정리 공지를 표시합니다."""
+    notice_html = (
+        '<div class="sg-account-notice">'
+        '<div class="sg-account-notice-title">📢 계정 이용 안내</div>'
+        '<div class="sg-account-notice-text">'
+        '기존 학생들의 <strong>중복 계정을 정리</strong>했습니다.<br>'
+        '모든 학생 계정은 <strong>본인 이름으로 수정 완료</strong>했습니다.<br>'
+        '문의사항이 있는 경우 화면 하단의 '
+        '<strong>오픈채팅 문의</strong>를 이용해주시기 바랍니다.'
+        '</div>'
+        '</div>'
+    )
+    st.markdown(notice_html, unsafe_allow_html=True)
 
 
 def show_global_footer():
@@ -2809,6 +2853,7 @@ if "is_superadmin" not in st.session_state:
 # ---------------------- 시작 화면 ----------------------
 def show_role_select():
     show_banner()
+    show_account_notice()
 
     st.markdown(
         '<div class="sg-role-title">📝 SG 고등관 오답노트</div>',
@@ -2864,6 +2909,7 @@ def show_role_select():
 def show_student():
     if st.session_state.student_user is None:
         show_banner()
+        show_account_notice()
 
         st.title("👩‍🎓 학생 로그인")
 
@@ -3070,6 +3116,7 @@ def show_student():
 def show_admin():
     if not st.session_state.is_admin:
         show_banner()
+        show_account_notice()
 
         st.title("👨‍🏫 선생님 로그인")
 
@@ -3636,6 +3683,7 @@ def show_admin():
 def show_superadmin():
     if not st.session_state.is_superadmin:
         show_banner()
+        show_account_notice()
 
         st.title("🔐 관리자 로그인")
         st.caption("학생 계정, 비밀번호 및 회원 복구 전용 화면입니다.")
