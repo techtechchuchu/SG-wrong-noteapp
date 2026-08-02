@@ -3,7 +3,7 @@ import base64
 import re
 import hashlib
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -2014,6 +2014,441 @@ def render_print_management():
     )
 
 
+
+def get_monday(date_value: datetime | None = None) -> datetime:
+    """입력 날짜가 포함된 주의 월요일 00:00을 반환합니다."""
+    current = date_value or datetime.now(KST).replace(tzinfo=None)
+    current = current.replace(hour=0, minute=0, second=0, microsecond=0)
+    return current - timedelta(days=current.weekday())
+
+
+def build_week_options(weeks_back: int = 12) -> dict[str, datetime]:
+    """이번 주부터 과거 주차까지 선택 가능한 목록을 생성합니다."""
+    current_monday = get_monday()
+    options: dict[str, datetime] = {}
+
+    for offset in range(weeks_back):
+        week_start = current_monday - timedelta(weeks=offset)
+        week_end = week_start + timedelta(days=6)
+        month_week = ((week_start.day - 1) // 7) + 1
+
+        prefix = "이번 주 · " if offset == 0 else ""
+        label = (
+            f"{prefix}{week_start.month}월 {month_week}주차 "
+            f"({week_start.month}/{week_start.day} 월 ~ "
+            f"{week_end.month}/{week_end.day} 일)"
+        )
+        options[label] = week_start
+
+    return options
+
+
+def parse_created_at_to_datetime(value) -> datetime | None:
+    """Supabase 작성일시 문자열을 비교 가능한 datetime으로 변환합니다."""
+    raw = str(value or "").strip()
+
+    if not raw:
+        return None
+
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+        if parsed.tzinfo is not None:
+            parsed = parsed.astimezone(KST).replace(tzinfo=None)
+
+        return parsed
+    except Exception:
+        return None
+
+
+def get_weekly_submission_df(
+    current_teacher: str,
+    week_start: datetime,
+) -> pd.DataFrame:
+    """
+    명단 학생을 기준으로 해당 주 월요일~일요일의 제출 여부를 계산합니다.
+    해당 기간에 문제번호를 1개 이상 저장하면 제출로 처리합니다.
+    """
+    roster = get_roster_df()
+
+    output_columns = [
+        "담당선생님", "반명", "학생명", "학교명", "학년",
+        "제출여부", "제출문제수", "제출교재", "최근제출일시",
+    ]
+
+    if roster.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    if current_teacher != ALL_TEACHER_ADMIN:
+        roster = roster[
+            roster["담당선생님"] == current_teacher
+        ].copy()
+
+    if roster.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    # 같은 학생이 같은 반에서 여러 교재로 명단에 등록된 경우 한 명으로 통합합니다.
+    roster_students = (
+        roster[
+            ["담당선생님", "반명", "학생명", "학교명", "학년"]
+        ]
+        .drop_duplicates()
+        .reset_index(drop=True)
+    )
+
+    answer_rows = fetch_all_rows(
+        "wrong_answers",
+        "username,unit,problem,created_at",
+        order_column="id",
+        desc=False,
+    )
+
+    week_end_exclusive = week_start + timedelta(days=7)
+    submission_map: dict[str, dict] = {}
+
+    for row in answer_rows:
+        created_dt = parse_created_at_to_datetime(row.get("created_at"))
+
+        if created_dt is None:
+            continue
+
+        if not (week_start <= created_dt < week_end_exclusive):
+            continue
+
+        username = str(row.get("username", "")).strip()
+        if not username:
+            continue
+
+        info = submission_map.setdefault(
+            username,
+            {
+                "numbers": [],
+                "books": [],
+                "latest_dt": None,
+                "latest_text": "",
+            },
+        )
+
+        for number in parse_problem_numbers(row.get("problem", "")):
+            if number not in info["numbers"]:
+                info["numbers"].append(number)
+
+        book = str(row.get("unit", "")).strip()
+        if book and book not in info["books"]:
+            info["books"].append(book)
+
+        if info["latest_dt"] is None or created_dt > info["latest_dt"]:
+            info["latest_dt"] = created_dt
+            info["latest_text"] = created_dt.strftime("%Y.%m.%d %H:%M")
+
+    records = []
+
+    for _, student in roster_students.iterrows():
+        student_name = str(student["학생명"]).strip()
+        submission = submission_map.get(
+            student_name,
+            {
+                "numbers": [],
+                "books": [],
+                "latest_text": "",
+            },
+        )
+        problem_count = len(submission["numbers"])
+
+        records.append(
+            {
+                "담당선생님": student["담당선생님"],
+                "반명": student["반명"],
+                "학생명": student_name,
+                "학교명": student["학교명"],
+                "학년": student["학년"],
+                "제출여부": "O" if problem_count > 0 else "X",
+                "제출문제수": problem_count,
+                "제출교재": ", ".join(submission["books"]),
+                "최근제출일시": submission["latest_text"],
+            }
+        )
+
+    return pd.DataFrame(records, columns=output_columns)
+
+
+def render_week_selector(key_prefix: str) -> tuple[datetime, str]:
+    """주차 선택과 새로고침 UI를 공통으로 표시합니다."""
+    week_options = build_week_options(weeks_back=12)
+    labels = list(week_options.keys())
+
+    col_week, col_refresh = st.columns([5, 1])
+
+    with col_week:
+        selected_label = st.selectbox(
+            "조회 주차",
+            labels,
+            index=0,
+            key=f"{key_prefix}_week_selector",
+        )
+
+    with col_refresh:
+        st.write("")
+        st.write("")
+        if st.button(
+            "새로고침",
+            key=f"{key_prefix}_refresh",
+            use_container_width=True,
+        ):
+            st.rerun()
+
+    return week_options[selected_label], selected_label
+
+
+def render_weekly_submission_status():
+    """선생님용 주간 제출 현황 탭을 표시합니다."""
+    current_teacher = st.session_state.teacher_name
+    week_start, selected_label = render_week_selector(
+        "weekly_submission"
+    )
+    week_end = week_start + timedelta(days=6)
+
+    st.caption(
+        f"조회 기간: {week_start.strftime('%Y.%m.%d')} 월요일 00:00부터 "
+        f"{week_end.strftime('%Y.%m.%d')} 일요일 23:59까지"
+    )
+    st.info(
+        "해당 기간에 문제번호를 1개 이상 저장한 학생을 제출 완료로 계산합니다. "
+        "학생이 오답을 저장한 뒤 새로고침하면 바로 반영됩니다."
+    )
+
+    weekly_df = get_weekly_submission_df(
+        current_teacher,
+        week_start,
+    )
+
+    if weekly_df.empty:
+        st.info("조회할 담당 학생 명단이 없습니다.")
+        return
+
+    total_students = weekly_df["학생명"].nunique()
+    submitted_students = weekly_df.loc[
+        weekly_df["제출여부"] == "O",
+        "학생명",
+    ].nunique()
+    missing_students = max(total_students - submitted_students, 0)
+    submission_rate = (
+        round(submitted_students / total_students * 100, 1)
+        if total_students
+        else 0.0
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("전체 학생", total_students)
+    col2.metric("제출 학생", submitted_students)
+    col3.metric("미제출 학생", missing_students)
+    col4.metric("제출률", f"{submission_rate}%")
+
+    status_filter = st.radio(
+        "제출 상태",
+        ["전체", "제출 완료", "미제출"],
+        horizontal=True,
+        key="weekly_submission_status_filter",
+    )
+
+    if status_filter == "제출 완료":
+        weekly_df = weekly_df[
+            weekly_df["제출여부"] == "O"
+        ].copy()
+    elif status_filter == "미제출":
+        weekly_df = weekly_df[
+            weekly_df["제출여부"] == "X"
+        ].copy()
+
+    if current_teacher == ALL_TEACHER_ADMIN:
+        weekly_df["관리용반명"] = (
+            weekly_df["담당선생님"].astype(str)
+            + " · "
+            + weekly_df["반명"].astype(str)
+        )
+    else:
+        weekly_df["관리용반명"] = weekly_df["반명"].astype(str)
+
+    class_names = sorted(
+        weekly_df["관리용반명"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+    if not class_names:
+        st.info(f"현재 '{status_filter}' 조건에 해당하는 학생이 없습니다.")
+        return
+
+    tab_labels = ["전체"] + class_names
+    class_tabs = st.tabs(tab_labels)
+
+    for tab_index, (class_tab, tab_name) in enumerate(
+        zip(class_tabs, tab_labels)
+    ):
+        with class_tab:
+            if tab_name == "전체":
+                tab_df = weekly_df.copy()
+            else:
+                tab_df = weekly_df[
+                    weekly_df["관리용반명"] == tab_name
+                ].copy()
+
+            tab_df = tab_df.sort_values(
+                by=["제출여부", "반명", "학생명"],
+                ascending=[True, True, True],
+            )
+
+            class_total = tab_df["학생명"].nunique()
+            class_submitted = tab_df.loc[
+                tab_df["제출여부"] == "O",
+                "학생명",
+            ].nunique()
+            class_missing = max(
+                class_total - class_submitted,
+                0,
+            )
+
+            metric1, metric2, metric3 = st.columns(3)
+            metric1.metric("학생", class_total)
+            metric2.metric("제출", class_submitted)
+            metric3.metric("미제출", class_missing)
+
+            display_columns = [
+                "담당선생님", "반명", "학생명", "학교명", "학년",
+                "제출여부", "제출문제수", "제출교재", "최근제출일시",
+            ]
+
+            st.dataframe(
+                tab_df[display_columns],
+                use_container_width=True,
+                hide_index=True,
+                height=520,
+            )
+
+            safe_tab_name = re.sub(
+                r"[^0-9A-Za-z가-힣_-]+",
+                "_",
+                tab_name,
+            )
+
+            st.download_button(
+                f"{tab_name} 주간 제출 현황 엑셀 다운로드",
+                data=dataframe_to_excel_bytes(
+                    tab_df[display_columns]
+                ),
+                file_name=(
+                    f"{current_teacher}_{safe_tab_name}_"
+                    f"{week_start.strftime('%Y%m%d')}_주간제출현황.xlsx"
+                ),
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                key=f"weekly_submission_download_{tab_index}",
+            )
+
+
+def render_weekly_missing_students():
+    """선생님용 미제출 학생 전용 탭을 표시합니다."""
+    current_teacher = st.session_state.teacher_name
+    week_start, selected_label = render_week_selector(
+        "weekly_missing"
+    )
+    week_end = week_start + timedelta(days=6)
+
+    st.caption(
+        f"조회 기간: {week_start.strftime('%Y.%m.%d')} 월요일부터 "
+        f"{week_end.strftime('%Y.%m.%d')} 일요일까지"
+    )
+
+    weekly_df = get_weekly_submission_df(
+        current_teacher,
+        week_start,
+    )
+
+    if weekly_df.empty:
+        st.info("조회할 담당 학생 명단이 없습니다.")
+        return
+
+    missing_df = weekly_df[
+        weekly_df["제출여부"] == "X"
+    ].copy()
+
+    if missing_df.empty:
+        st.success("선택한 주차에는 미제출 학생이 없습니다.")
+        return
+
+    if current_teacher == ALL_TEACHER_ADMIN:
+        teacher_options = ["전체"] + sorted(
+            missing_df["담당선생님"]
+            .dropna()
+            .astype(str)
+            .unique()
+            .tolist()
+        )
+        selected_teacher = st.selectbox(
+            "담당 선생님 필터",
+            teacher_options,
+            key="weekly_missing_teacher_filter",
+        )
+
+        if selected_teacher != "전체":
+            missing_df = missing_df[
+                missing_df["담당선생님"] == selected_teacher
+            ].copy()
+
+    class_options = ["전체"] + sorted(
+        missing_df["반명"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+    selected_class = st.selectbox(
+        "반 필터",
+        class_options,
+        key="weekly_missing_class_filter",
+    )
+
+    if selected_class != "전체":
+        missing_df = missing_df[
+            missing_df["반명"] == selected_class
+        ].copy()
+
+    st.metric(
+        "현재 조건 미제출 학생",
+        missing_df["학생명"].nunique(),
+    )
+
+    display_columns = [
+        "담당선생님", "반명", "학생명", "학교명", "학년",
+        "제출여부", "제출문제수", "제출교재", "최근제출일시",
+    ]
+
+    st.dataframe(
+        missing_df[display_columns],
+        use_container_width=True,
+        hide_index=True,
+        height=560,
+    )
+
+    st.download_button(
+        "미제출 학생 엑셀 다운로드",
+        data=dataframe_to_excel_bytes(
+            missing_df[display_columns]
+        ),
+        file_name=(
+            f"{current_teacher}_"
+            f"{week_start.strftime('%Y%m%d')}_미제출학생.xlsx"
+        ),
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="weekly_missing_download",
+        type="primary",
+    )
+
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
 
@@ -3164,9 +3599,18 @@ def show_admin():
     st.title("👨‍🏫 선생님 관리")
     st.caption(f"현재 로그인: {st.session_state.teacher_name or '선생님 미지정'}")
 
-    tab_answers, tab_teacher_students, tab_paper, tab_print = st.tabs(
+    (
+        tab_answers,
+        tab_weekly_submission,
+        tab_weekly_missing,
+        tab_teacher_students,
+        tab_paper,
+        tab_print,
+    ) = st.tabs(
         [
             "📋 전체 오답 현황",
+            "📅 주간 제출 현황",
+            "🚨 미제출 학생 보기",
             "🏫 내 반 학생",
             "🧾 오답노트 만들기",
             "🖨️ 출력 관리",
@@ -3289,6 +3733,13 @@ def show_admin():
                         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                         key="download_variant_students",
                     )
+
+
+    with tab_weekly_submission:
+        render_weekly_submission_status()
+
+    with tab_weekly_missing:
+        render_weekly_missing_students()
 
     with tab_teacher_students:
         status_df = get_teacher_student_status_df()
