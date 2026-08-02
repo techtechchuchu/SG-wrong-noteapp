@@ -523,20 +523,12 @@ def show_account_notice():
     """역할 선택 및 로그인 화면에 계정 정리 공지를 표시합니다."""
     notice_html = (
         '<div class="sg-account-notice">'
-        '<div class="sg-account-notice-title">📢 계정 이용 안내
-    </div>
-
-    <div style="
-        font-size:16px;
-        line-height:1.8;
-        color:#333;
-    ">
-        기존 학생들의 <b>중복 계정을 모두 정리</b>했습니다.<br>
-        모든 학생 계정은 <b>본인 이름으로 수정 완료</b>되었습니다.<br>
-        <span style="color:#D32F2F; font-weight:700;">
-        비밀번호 오류 및 계정 관리 등 문의사항은
-        하단의 <b>오픈채팅 문의</b>를 이용해 주시기 바랍니다.
-        </span>
+        '<div class="sg-account-notice-title">📢 계정 이용 안내</div>'
+        '<div class="sg-account-notice-text">'
+        '기존 학생들의 <strong>중복 계정을 정리</strong>했습니다.<br>'
+        '모든 학생 계정은 <strong>본인 이름으로 수정 완료</strong>했습니다.<br>'
+        '<strong>비밀번호 오류 및 계정 관리 등 문의사항은 화면 하단의 '
+        '오픈채팅 문의를 이용해주시기 바랍니다.</strong>'
         '</div>'
         '</div>'
     )
