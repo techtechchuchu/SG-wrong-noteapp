@@ -42,7 +42,6 @@ ROSTER_REQUIRED_COLUMNS = {
     "학생명",
     "학교명",
     "학년",
-    "매칭교재",
 }
 
 GRADES = ["중3", "고1", "고2", "고3"]
@@ -573,6 +572,7 @@ def verify_supabase_connection():
         ("wrong_answers", "id"),
         ("student_roster", "id"),
         ("print_status", "id"),
+        ("book_master", "id"),
         ("school_exam_master", "id"),
         ("school_exam_wrong_answers", "id"),
     ]
@@ -729,6 +729,9 @@ def import_roster_from_excel(uploaded_file) -> dict:
             "명단 엑셀에 필요한 열이 없습니다: " + ", ".join(sorted(missing))
         )
 
+    if "매칭교재" not in df.columns:
+        df["매칭교재"] = ""
+
     clean_df = df[
         ["반명", "담당선생님", "학생명", "학교명", "학년", "매칭교재"]
     ].copy()
@@ -745,7 +748,7 @@ def import_roster_from_excel(uploaded_file) -> dict:
         & (clean_df["반명"] != "")
         & (clean_df["담당선생님"] != "")
     ].drop_duplicates(
-        subset=["반명", "담당선생님", "학생명", "매칭교재"]
+        subset=["반명", "담당선생님", "학생명"]
     )
 
     rows = [
@@ -783,9 +786,69 @@ def get_student_roster_rows(username: str) -> pd.DataFrame:
     return roster[roster["학생명"] == username].copy()
 
 
-def get_student_allowed_books(username: str) -> list[str]:
-    """학생 명단의 매칭 교재와 관계없이 전체 교재 목록을 반환합니다."""
+def get_book_master_df(active_only: bool = True) -> pd.DataFrame:
+    filters = [("is_active", "eq", True)] if active_only else []
+
+    rows = fetch_all_rows(
+        "book_master",
+        (
+            "id,book_name,grade,subject,publisher,"
+            "question_count,category,is_active,created_at"
+        ),
+        filters=filters,
+        order_column="book_name",
+        desc=False,
+    )
+
+    columns = [
+        "교재ID", "교재명", "학년", "과목", "출판사",
+        "문항수", "분류", "사용중", "등록일시",
+    ]
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(
+        [
+            {
+                "교재ID": row.get("id"),
+                "교재명": row.get("book_name", ""),
+                "학년": row.get("grade", ""),
+                "과목": row.get("subject", ""),
+                "출판사": row.get("publisher", ""),
+                "문항수": row.get("question_count"),
+                "분류": row.get("category", "교재"),
+                "사용중": bool(row.get("is_active", True)),
+                "등록일시": row.get("created_at", ""),
+            }
+            for row in rows
+        ],
+        columns=columns,
+    )
+
+
+def get_active_book_names() -> list[str]:
+    try:
+        book_df = get_book_master_df(active_only=True)
+
+        if not book_df.empty:
+            names = (
+                book_df["교재명"]
+                .dropna()
+                .astype(str)
+                .str.strip()
+                .tolist()
+            )
+            return list(dict.fromkeys(name for name in names if name))
+    except Exception:
+        pass
+
     return BOOKS.copy()
+
+
+def get_student_allowed_books(username: str) -> list[str]:
+    """현재 관리자 화면에서 사용 중으로 설정된 교재를 반환합니다."""
+    return get_active_book_names()
 
 
 def get_teacher_student_status_df() -> pd.DataFrame:
@@ -896,6 +959,7 @@ def build_claude_export_df(
     teacher_name: str,
     class_name: str,
     selected_students: list[str],
+    selected_book: str,
     month: int,
     week: int,
 ) -> pd.DataFrame:
@@ -913,7 +977,7 @@ def build_claude_export_df(
     for _, student in selected_roster.iterrows():
         student_answers = answers[
             (answers["학생"] == student["학생명"])
-            & (answers["교재"] == student["매칭교재"])
+            & (answers["교재"] == selected_book)
         ].copy()
 
         all_numbers = []
@@ -932,7 +996,7 @@ def build_claude_export_df(
             teacher_name,
             class_name,
             student["학년"],
-            student["매칭교재"],
+            selected_book,
             month,
             week,
         )
@@ -944,7 +1008,7 @@ def build_claude_export_df(
                 "학년": student["학년"],
                 "담당선생님": teacher_name,
                 "반명": class_name,
-                "교재": student["매칭교재"],
+                "교재": selected_book,
                 "문제번호": format_problem_numbers(all_numbers),
                 "비고": " / ".join(all_memos),
                 "PDF상단제목": title,
@@ -1644,6 +1708,7 @@ def ensure_selected_print_status_records(
     teacher_name: str,
     class_name: str,
     student_names: list[str],
+    book_name: str,
     month: int,
     week: int,
 ) -> int:
@@ -1694,8 +1759,8 @@ def ensure_selected_print_status_records(
 
     for _, row in target.iterrows():
         student_name = str(row["학생명"]).strip()
-        book_name = str(row["매칭교재"]).strip()
-        key = (student_name, book_name)
+        selected_book_name = str(book_name).strip()
+        key = (student_name, selected_book_name)
 
         if key in existing_keys:
             continue
@@ -1705,7 +1770,7 @@ def ensure_selected_print_status_records(
                 "teacher_name": teacher_name,
                 "class_name": class_name,
                 "student_name": student_name,
-                "book_name": book_name,
+                "book_name": selected_book_name,
                 "month": int(month),
                 "week": int(week),
                 "is_printed": False,
@@ -1725,6 +1790,7 @@ def register_print_queue_on_download(
     teacher_name: str,
     class_name: str,
     student_names: list[str],
+    book_name: str,
     month: int,
     week: int,
 ):
@@ -1737,6 +1803,7 @@ def register_print_queue_on_download(
             teacher_name,
             class_name,
             student_names,
+            book_name,
             month,
             week,
         )
@@ -2895,6 +2962,423 @@ def render_student_signup_status():
             type="primary",
         )
 
+
+
+# ============================================================
+# 교재 마스터 관리
+# ============================================================
+def parse_book_bulk_text(raw_text: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    valid_rows = []
+    error_rows = []
+
+    lines = [
+        line.strip()
+        for line in str(raw_text or "").splitlines()
+        if line.strip()
+    ]
+
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            if "|" in line:
+                parts = [part.strip() for part in line.split("|")]
+            elif "\t" in line:
+                parts = [part.strip() for part in line.split("\t")]
+            else:
+                parts = [line]
+
+            parts += [""] * (6 - len(parts))
+            book_name, grade, subject, publisher, count_raw, category = parts[:6]
+
+            book_name = str(book_name).strip()
+            category = str(category).strip() or "교재"
+
+            if not book_name:
+                raise ValueError("교재명이 비어 있습니다.")
+
+            if str(count_raw).strip():
+                digits = re.sub(r"[^0-9]", "", str(count_raw))
+                if not digits:
+                    raise ValueError("문항 수를 숫자로 입력해주세요.")
+                question_count = int(digits)
+            else:
+                question_count = None
+
+            valid_rows.append(
+                {
+                    "줄번호": line_number,
+                    "교재명": book_name,
+                    "학년": str(grade).strip(),
+                    "과목": str(subject).strip(),
+                    "출판사": str(publisher).strip(),
+                    "문항수": question_count,
+                    "분류": category,
+                    "원문": line,
+                }
+            )
+        except Exception as error:
+            error_rows.append(
+                {
+                    "줄번호": line_number,
+                    "원문": line,
+                    "오류": str(error),
+                }
+            )
+
+    return (
+        pd.DataFrame(valid_rows),
+        pd.DataFrame(error_rows),
+    )
+
+
+def register_book_rows(valid_df: pd.DataFrame) -> dict:
+    if valid_df.empty:
+        return {"created": 0, "skipped": 0}
+
+    existing_df = get_book_master_df(active_only=False)
+    existing_names = set(
+        existing_df.get("교재명", pd.Series(dtype=str))
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .tolist()
+    )
+
+    rows = []
+    skipped = 0
+
+    for _, row in valid_df.iterrows():
+        book_name = str(row["교재명"]).strip()
+
+        if book_name in existing_names:
+            skipped += 1
+            continue
+
+        rows.append(
+            {
+                "book_name": book_name,
+                "grade": str(row.get("학년", "") or "").strip(),
+                "subject": str(row.get("과목", "") or "").strip(),
+                "publisher": str(row.get("출판사", "") or "").strip(),
+                "question_count": (
+                    int(row["문항수"])
+                    if pd.notna(row.get("문항수"))
+                    else None
+                ),
+                "category": str(row.get("분류", "교재") or "교재").strip(),
+                "is_active": True,
+                "created_at": now_kst_iso(),
+            }
+        )
+        existing_names.add(book_name)
+
+    if rows:
+        supabase.table("book_master").insert(rows).execute()
+
+    return {"created": len(rows), "skipped": skipped}
+
+
+def set_book_active(book_id: int, is_active: bool):
+    (
+        supabase.table("book_master")
+        .update({"is_active": bool(is_active)})
+        .eq("id", int(book_id))
+        .execute()
+    )
+
+
+def update_book_master(
+    book_id: int,
+    book_name: str,
+    grade: str,
+    subject: str,
+    publisher: str,
+    question_count: int | None,
+    category: str,
+):
+    current = (
+        supabase.table("book_master")
+        .select("book_name")
+        .eq("id", int(book_id))
+        .limit(1)
+        .execute()
+    )
+
+    if not current.data:
+        raise ValueError("수정할 교재를 찾을 수 없습니다.")
+
+    old_name = str(current.data[0].get("book_name", "")).strip()
+    new_name = str(book_name or "").strip()
+
+    if not new_name:
+        raise ValueError("교재명을 입력해주세요.")
+
+    (
+        supabase.table("book_master")
+        .update(
+            {
+                "book_name": new_name,
+                "grade": str(grade or "").strip(),
+                "subject": str(subject or "").strip(),
+                "publisher": str(publisher or "").strip(),
+                "question_count": question_count,
+                "category": str(category or "교재").strip(),
+            }
+        )
+        .eq("id", int(book_id))
+        .execute()
+    )
+
+    if old_name and old_name != new_name:
+        supabase.table("wrong_answers").update(
+            {"unit": new_name}
+        ).eq("unit", old_name).execute()
+
+        supabase.table("print_status").update(
+            {"book_name": new_name}
+        ).eq("book_name", old_name).execute()
+
+
+def initialize_default_books() -> int:
+    existing_df = get_book_master_df(active_only=False)
+    existing_names = set(
+        existing_df.get("교재명", pd.Series(dtype=str))
+        .dropna()
+        .astype(str)
+        .tolist()
+    )
+
+    rows = []
+
+    for name in BOOKS:
+        if name in existing_names:
+            continue
+
+        rows.append(
+            {
+                "book_name": name,
+                "grade": "",
+                "subject": "",
+                "publisher": "",
+                "question_count": None,
+                "category": "기존 교재",
+                "is_active": True,
+                "created_at": now_kst_iso(),
+            }
+        )
+
+    if rows:
+        supabase.table("book_master").insert(rows).execute()
+
+    return len(rows)
+
+
+def render_book_admin():
+    st.subheader("📚 교재 관리")
+
+    st.warning(
+        "교재명을 수정하면 기존 오답 기록의 교재명도 함께 변경됩니다. "
+        "선택한 교재가 맞는지 반드시 확인해주세요."
+    )
+
+    if st.button(
+        "기존 기본 교재 목록 불러오기",
+        key="book_default_import",
+        use_container_width=True,
+    ):
+        count = initialize_default_books()
+        if count:
+            st.success(f"기존 교재 {count}개를 등록했습니다.")
+        else:
+            st.info("기존 기본 교재가 이미 등록되어 있습니다.")
+        st.rerun()
+
+    bulk_tab, edit_tab, status_tab = st.tabs(
+        ["📋 복붙 등록", "✏️ 교재 수정", "👁️ 사용 여부"]
+    )
+
+    with bulk_tab:
+        st.caption(
+            "형식: 교재명 | 학년 | 과목 | 출판사 | 문항수 | 분류"
+        )
+        st.code(
+            "고쟁이 미적분2 | 고2 | 미적분2 | 이투스 | 724 | 내신교재\n"
+            "RPM 공통수학2 | 고1 | 공통수학2 | 천재교육 | 560 | 내신교재\n"
+            "교재명만 입력",
+            language="text",
+        )
+
+        raw_text = st.text_area(
+            "교재 목록 복붙",
+            height=220,
+            key="book_bulk_text",
+        )
+
+        if st.button(
+            "교재 미리보기",
+            key="book_bulk_preview",
+            use_container_width=True,
+        ):
+            valid_df, error_df = parse_book_bulk_text(raw_text)
+            st.session_state["book_valid_preview"] = valid_df
+            st.session_state["book_error_preview"] = error_df
+
+        valid_df = st.session_state.get("book_valid_preview", pd.DataFrame())
+        error_df = st.session_state.get("book_error_preview", pd.DataFrame())
+
+        if not valid_df.empty:
+            st.success(f"정상 인식: {len(valid_df)}건")
+            st.dataframe(valid_df, use_container_width=True, hide_index=True)
+
+        if not error_df.empty:
+            st.error(f"오류 행: {len(error_df)}건")
+            st.dataframe(error_df, use_container_width=True, hide_index=True)
+
+        confirm = st.checkbox(
+            "정상 인식된 교재를 등록합니다.",
+            key="book_bulk_confirm",
+        )
+
+        if st.button(
+            "교재 일괄 등록",
+            type="primary",
+            key="book_bulk_register",
+            disabled=valid_df.empty,
+            use_container_width=True,
+        ):
+            if not confirm:
+                st.warning("등록 확인에 체크해주세요.")
+            else:
+                result = register_book_rows(valid_df)
+                st.success(
+                    f"신규 {result['created']}건 등록, "
+                    f"중복 {result['skipped']}건 제외"
+                )
+                st.session_state.pop("book_valid_preview", None)
+                st.session_state.pop("book_error_preview", None)
+                st.rerun()
+
+    book_df = get_book_master_df(active_only=False)
+
+    with edit_tab:
+        if book_df.empty:
+            st.info("등록된 교재가 없습니다.")
+        else:
+            options = {
+                int(row["교재ID"]): row["교재명"]
+                for _, row in book_df.iterrows()
+            }
+
+            book_id = st.selectbox(
+                "수정할 교재",
+                options=list(options.keys()),
+                format_func=lambda value: options[value],
+                key="book_edit_id",
+            )
+
+            row = book_df[book_df["교재ID"] == book_id].iloc[0]
+
+            name = st.text_input(
+                "교재명",
+                value=str(row["교재명"]),
+                key="book_edit_name",
+            )
+            grade = st.text_input(
+                "학년",
+                value=str(row["학년"] or ""),
+                key="book_edit_grade",
+            )
+            subject = st.text_input(
+                "과목",
+                value=str(row["과목"] or ""),
+                key="book_edit_subject",
+            )
+            publisher = st.text_input(
+                "출판사",
+                value=str(row["출판사"] or ""),
+                key="book_edit_publisher",
+            )
+            count = st.number_input(
+                "문항 수",
+                min_value=0,
+                value=(
+                    int(row["문항수"])
+                    if pd.notna(row["문항수"])
+                    else 0
+                ),
+                key="book_edit_count",
+            )
+            category = st.text_input(
+                "분류",
+                value=str(row["분류"] or "교재"),
+                key="book_edit_category",
+            )
+
+            edit_confirm = st.checkbox(
+                f"'{row['교재명']}' 교재가 맞는지 확인했습니다.",
+                key="book_edit_confirm",
+            )
+
+            if st.button(
+                "교재 정보 저장",
+                type="primary",
+                key="book_edit_save",
+                use_container_width=True,
+            ):
+                if not edit_confirm:
+                    st.error("수정할 교재가 맞는지 확인 후 체크해주세요.")
+                else:
+                    update_book_master(
+                        book_id,
+                        name,
+                        grade,
+                        subject,
+                        publisher,
+                        int(count) if count > 0 else None,
+                        category,
+                    )
+                    st.success("교재 정보를 수정했습니다.")
+                    st.rerun()
+
+    with status_tab:
+        if book_df.empty:
+            st.info("등록된 교재가 없습니다.")
+        else:
+            st.dataframe(
+                book_df,
+                use_container_width=True,
+                hide_index=True,
+                height=450,
+            )
+
+            options = {
+                int(row["교재ID"]): (
+                    f"{row['교재명']} · "
+                    + ("사용중" if row["사용중"] else "숨김")
+                )
+                for _, row in book_df.iterrows()
+            }
+
+            book_id = st.selectbox(
+                "사용 여부 변경",
+                options=list(options.keys()),
+                format_func=lambda value: options[value],
+                key="book_status_id",
+            )
+
+            active = bool(
+                book_df.loc[
+                    book_df["교재ID"] == book_id,
+                    "사용중",
+                ].iloc[0]
+            )
+
+            if st.button(
+                "학생 화면에서 숨기기" if active else "다시 표시",
+                key="book_status_toggle",
+                use_container_width=True,
+            ):
+                set_book_active(book_id, not active)
+                st.rerun()
 
 # ============================================================
 # 학교 기출 관리
@@ -5069,11 +5553,18 @@ def show_student():
             st.session_state.student_user
         )
 
+        st.warning(
+            "⚠️ 주의: 선택한 교재가 실제로 오답번호를 작성할 교재가 맞는지 "
+            "반드시 확인해주세요. 잘못 선택하면 다른 교재의 오답 Paper에 반영될 수 있습니다."
+        )
+
         book = st.selectbox(
             "교재 선택",
             allowed_books,
-            help="등록된 전체 교재 목록에서 자유롭게 선택할 수 있습니다."
+            help="관리자가 등록한 사용 중 교재 목록입니다."
         )
+
+        st.info(f"현재 선택한 교재: **{book}**")
 
         problem_number = st.text_input(
             "문제 번호",
@@ -5085,9 +5576,16 @@ def show_student():
             placeholder="예: 계산 실수, 개념 헷갈림, 다시 질문 필요, 변형문제 필요 등"
         )
 
+        book_confirm = st.checkbox(
+            f"'{book}' 교재가 맞는지 확인했습니다.",
+            key="student_book_confirm",
+        )
+
         if st.button("오답 저장"):
             if problem_number.strip() == "":
                 st.warning("문제 번호를 입력해주세요.")
+            elif not book_confirm:
+                st.error("선택한 교재가 맞는지 확인한 후 체크해주세요.")
             else:
                 result = add_wrong_answer(
                     st.session_state.student_user,
@@ -5575,7 +6073,7 @@ def show_admin():
 
             with col_month:
                 month = st.selectbox(
-                    "4. 월",
+                    "5. 월",
                     list(range(1, 13)),
                     index=datetime.now(KST).month - 1,
                     key="paper_month",
@@ -5583,7 +6081,7 @@ def show_admin():
 
             with col_week:
                 week = st.selectbox(
-                    "5. 주차",
+                    "6. 주차",
                     [1, 2, 3, 4, 5],
                     index=min((datetime.now(KST).day - 1) // 7, 4),
                     key="paper_week",
@@ -5595,7 +6093,7 @@ def show_admin():
                     selected_teacher,
                     selected_class,
                     sample["학년"],
-                    sample["매칭교재"],
+                    selected_book,
                     month,
                     week,
                 )
@@ -5612,6 +6110,7 @@ def show_admin():
                     selected_teacher,
                     selected_class,
                     selected_students,
+                    selected_book,
                     month,
                     week,
                 )
@@ -5660,6 +6159,7 @@ def show_admin():
                         selected_teacher,
                         selected_class,
                         selected_students,
+                        selected_book,
                         month,
                         week,
                     ),
@@ -5894,6 +6394,11 @@ def show_superadmin():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_current_roster",
                 )
+
+        st.divider()
+
+        with st.expander("📚 교재 관리", expanded=False):
+            render_book_admin()
 
         st.divider()
 
