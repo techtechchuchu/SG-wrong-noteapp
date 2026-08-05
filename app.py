@@ -99,13 +99,29 @@ def get_qr_signup_code():
 
 
 def apply_global_style():
+    """Light·Dark·System 및 모바일 화면을 지원하는 공통 스타일입니다."""
     st.markdown(
         """
         <style>
+        :root {
+            --sg-bg: var(--background-color);
+            --sg-surface: var(--secondary-background-color);
+            --sg-text: var(--text-color);
+            --sg-primary: var(--primary-color);
+            --sg-muted: color-mix(in srgb, var(--text-color) 66%, transparent);
+            --sg-border: color-mix(in srgb, var(--text-color) 18%, transparent);
+            --sg-shadow: rgba(0, 0, 0, 0.12);
+        }
+
         .stApp {
-            background:
-                radial-gradient(circle at top left, rgba(40, 180, 170, 0.05), transparent 28%),
-                linear-gradient(180deg, #ffffff 0%, #fbfcfe 100%);
+            background: var(--sg-bg) !important;
+            color: var(--sg-text) !important;
+        }
+
+        [data-testid="stAppViewContainer"],
+        [data-testid="stMain"],
+        [data-testid="stMainBlockContainer"] {
+            background: transparent !important;
         }
 
         .block-container {
@@ -114,35 +130,47 @@ def apply_global_style():
             padding-bottom: 8.5rem;
         }
 
-        h1, h2, h3 {
+        h1, h2, h3, h4, h5, h6 {
+            color: var(--sg-text);
             letter-spacing: -0.03em;
         }
 
-        div[data-testid="stButton"] > button {
+        div[data-testid="stButton"] > button,
+        div[data-testid="stDownloadButton"] > button {
             min-height: 3.15rem;
             border-radius: 12px;
             font-weight: 700;
-            border: 1px solid #d8dde6;
-            transition: all 0.18s ease;
+            border-color: var(--sg-border);
+            transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
             white-space: pre-line;
         }
 
-        div[data-testid="stButton"] > button:hover {
+        div[data-testid="stButton"] > button:hover,
+        div[data-testid="stDownloadButton"] > button:hover {
             transform: translateY(-1px);
-            box-shadow: 0 8px 18px rgba(31, 41, 55, 0.08);
-            border-color: #aab4c3;
+            box-shadow: 0 8px 18px var(--sg-shadow);
         }
 
         div[data-testid="stTextInput"] input,
         div[data-testid="stTextArea"] textarea,
-        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+        div[data-testid="stNumberInput"] input,
+        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div,
+        div[data-testid="stMultiSelect"] div[data-baseweb="select"] > div {
             border-radius: 10px;
         }
 
         div[data-testid="stExpander"] {
             border-radius: 12px;
-            border: 1px solid #e3e7ed;
+            border-color: var(--sg-border);
             overflow: hidden;
+        }
+
+        .stTabs [data-baseweb="tab"] {
+            color: var(--sg-muted) !important;
+        }
+
+        .stTabs [data-baseweb="tab"][aria-selected="true"] {
+            color: var(--sg-primary) !important;
         }
 
         .sg-role-title {
@@ -150,12 +178,12 @@ def apply_global_style():
             margin-bottom: 0.25rem;
             font-size: 2.1rem;
             font-weight: 900;
-            color: #202938;
+            color: var(--sg-text);
             letter-spacing: -0.04em;
         }
 
         .sg-role-subtitle {
-            color: #586174;
+            color: var(--sg-muted);
             margin-bottom: 1rem;
             font-size: 1rem;
         }
@@ -164,9 +192,9 @@ def apply_global_style():
             margin-top: 1rem;
             padding: 14px 16px;
             border-radius: 12px;
-            background: #eef6ff;
-            border: 1px solid #cfe3fb;
-            color: #35506f;
+            background: var(--sg-surface);
+            border: 1px solid var(--sg-border);
+            color: var(--sg-text);
             font-size: 14px;
             line-height: 1.65;
         }
@@ -176,20 +204,25 @@ def apply_global_style():
             box-sizing: border-box;
             margin: 2px 0 22px;
             padding: 16px 18px;
-            border: 1px solid #cfe3fb;
-            border-left: 5px solid #2878c8;
+            border: 1px solid var(--sg-border);
+            border-left: 5px solid var(--sg-primary);
             border-radius: 13px;
-            background: linear-gradient(135deg, #f5faff 0%, #edf6ff 100%);
-            color: #2e4f6d;
+            background: var(--sg-surface);
+            color: var(--sg-text);
             line-height: 1.7;
-            box-shadow: 0 5px 16px rgba(40, 120, 200, 0.07);
+            box-shadow: 0 5px 16px var(--sg-shadow);
         }
 
         .sg-account-notice-title {
             margin-bottom: 6px;
-            color: #15599d;
+            color: var(--sg-primary);
             font-size: 17px;
             font-weight: 850;
+        }
+
+        .sg-account-notice-text,
+        .sg-account-notice strong {
+            color: var(--sg-text);
         }
 
         .sg-account-notice-text {
@@ -205,7 +238,7 @@ def apply_global_style():
             align-items: center;
             justify-content: flex-start;
             box-sizing: border-box;
-            padding: 10px 8px 14px 8px;
+            padding: 10px 8px 14px;
             overflow: visible;
         }
 
@@ -231,16 +264,18 @@ def apply_global_style():
             flex-wrap: wrap;
             gap: 6px 12px;
             padding: 9px 14px 10px;
-            border: 1px solid #e7ebf0;
+            border: 1px solid var(--sg-border);
             border-bottom: 0;
             border-radius: 14px 14px 0 0;
-            background: rgba(255, 255, 255, 0.98);
-            backdrop-filter: blur(8px);
+            background: var(--sg-bg);
+            opacity: 0.98;
+            backdrop-filter: blur(10px);
+            -webkit-backdrop-filter: blur(10px);
             text-align: center;
-            color: #7d8798;
+            color: var(--sg-muted);
             font-size: 12px;
             line-height: 1.4;
-            box-shadow: 0 -5px 18px rgba(31, 41, 55, 0.07);
+            box-shadow: 0 -5px 18px var(--sg-shadow);
         }
 
         .sg-footer-text {
@@ -249,9 +284,13 @@ def apply_global_style():
             gap: 1px;
         }
 
+        .sg-footer-text,
+        .sg-footer-text span,
         .sg-footer-credit {
-            white-space: nowrap;
+            color: var(--sg-muted);
         }
+
+        .sg-footer-credit { white-space: nowrap; }
 
         .sg-contact-button {
             display: inline-flex;
@@ -259,7 +298,7 @@ def apply_global_style():
             justify-content: center;
             min-height: 34px;
             padding: 6px 13px;
-            border: 1px solid #e3cd00;
+            border: 1px solid #d1bb00;
             border-radius: 9px;
             background: #fee500;
             color: #191919 !important;
@@ -273,21 +312,21 @@ def apply_global_style():
 
         .sg-contact-button:hover {
             transform: translateY(-1px);
-            box-shadow: 0 5px 12px rgba(25, 25, 25, 0.12);
+            box-shadow: 0 5px 12px rgba(0, 0, 0, 0.18);
         }
 
         .sg-notice-card {
             box-sizing: border-box;
             width: 100%;
-            margin: 16px 0 24px 0;
+            margin: 16px 0 24px;
             padding: 24px 26px;
-            border: 1px solid #ead5cf;
-            border-left: 6px solid #a62c20;
+            border: 1px solid var(--sg-border);
+            border-left: 6px solid var(--sg-primary);
             border-radius: 16px;
-            background: linear-gradient(135deg, #fffdfa 0%, #fff7f3 100%);
-            color: #252b35;
+            background: var(--sg-surface);
+            color: var(--sg-text);
             line-height: 1.72;
-            box-shadow: 0 10px 28px rgba(87, 49, 38, 0.08);
+            box-shadow: 0 10px 28px var(--sg-shadow);
             overflow: visible;
         }
 
@@ -296,7 +335,7 @@ def apply_global_style():
             align-items: center;
             gap: 10px;
             margin-bottom: 14px;
-            color: #8f241b;
+            color: var(--sg-primary);
             font-size: 23px;
             font-weight: 900;
             letter-spacing: -0.5px;
@@ -304,6 +343,7 @@ def apply_global_style():
 
         .sg-notice-intro,
         .sg-notice-foot {
+            color: var(--sg-text);
             font-size: 16px;
             word-break: keep-all;
             overflow-wrap: anywhere;
@@ -315,19 +355,17 @@ def apply_global_style():
             gap: 12px;
             margin: 18px 0;
             padding: 14px 17px;
-            border: 1px solid #ead8d2;
+            border: 1px solid var(--sg-border);
             border-radius: 12px;
-            background: #ffffff;
+            background: var(--sg-bg);
+            color: var(--sg-text);
         }
 
-        .sg-lock {
-            flex: 0 0 auto;
-            font-size: 21px;
-        }
+        .sg-lock { flex: 0 0 auto; font-size: 21px; }
 
         .sg-temp-label {
             flex: 0 1 auto;
-            color: #364152;
+            color: var(--sg-text);
             font-size: 16px;
             font-weight: 800;
             white-space: nowrap;
@@ -337,8 +375,8 @@ def apply_global_style():
             flex: 0 0 auto;
             padding: 5px 12px;
             border-radius: 9px;
-            background: #fff0e8;
-            color: #b3261e;
+            background: var(--sg-surface);
+            color: var(--sg-primary);
             font-size: 21px;
             font-weight: 900;
         }
@@ -346,14 +384,15 @@ def apply_global_style():
         .sg-action-box {
             margin-top: 16px;
             padding: 16px 18px;
-            border: 1px solid #cfe3f6;
+            border: 1px solid var(--sg-border);
             border-radius: 12px;
-            background: #eef7ff;
+            background: var(--sg-bg);
+            color: var(--sg-text);
         }
 
         .sg-action-title {
             margin-bottom: 10px;
-            color: #174b87;
+            color: var(--sg-primary);
             font-size: 17px;
             font-weight: 850;
         }
@@ -363,14 +402,13 @@ def apply_global_style():
             align-items: flex-start;
             gap: 10px;
             margin: 8px 0;
+            color: var(--sg-text);
             font-size: 16px;
             word-break: keep-all;
             overflow-wrap: anywhere;
         }
 
-        .sg-action-item strong {
-            color: #174b87;
-        }
+        .sg-action-item strong { color: var(--sg-primary); }
 
         .sg-action-number {
             display: inline-flex;
@@ -380,8 +418,8 @@ def apply_global_style():
             align-items: center;
             justify-content: center;
             border-radius: 999px;
-            background: #174b87;
-            color: #ffffff;
+            background: var(--sg-primary);
+            color: #ffffff !important;
             font-size: 13px;
             font-weight: 800;
             line-height: 1;
@@ -389,14 +427,14 @@ def apply_global_style():
 
         .sg-notice-foot {
             margin-top: 16px;
-            color: #5d6470;
+            color: var(--sg-muted);
             font-size: 15px;
         }
 
         .sg-signature {
             margin-top: 18px;
             text-align: center;
-            color: #303846;
+            color: var(--sg-text);
             font-size: 16px;
             font-weight: 800;
         }
@@ -406,18 +444,11 @@ def apply_global_style():
                 padding-left: 1rem;
                 padding-right: 1rem;
                 padding-top: 1rem;
-                padding-bottom: 9rem;
+                padding-bottom: 10.5rem;
             }
 
-            .sg-logo-wrap {
-                min-height: 76px;
-                padding: 8px 2px 10px;
-            }
-
-            .sg-logo-wrap img {
-                width: 285px;
-                max-width: 90vw;
-            }
+            .sg-logo-wrap { min-height: 76px; padding: 8px 2px 10px; }
+            .sg-logo-wrap img { width: 285px; max-width: 90vw; }
 
             .sg-footer {
                 width: calc(100% - 0.75rem);
@@ -426,32 +457,11 @@ def apply_global_style():
                 font-size: 10.5px;
             }
 
-            .sg-contact-button {
-                min-height: 32px;
-                padding: 6px 11px;
-                font-size: 12px;
-            }
-
-            .sg-footer-credit {
-                width: 100%;
-            }
-
-            .sg-notice-card {
-                margin-top: 10px;
-                padding: 18px 16px;
-                border-left-width: 5px;
-                border-radius: 14px;
-            }
-
-            .sg-notice-title {
-                font-size: 20px;
-            }
-
-            .sg-notice-intro,
-            .sg-action-item {
-                font-size: 15px;
-                line-height: 1.65;
-            }
+            .sg-contact-button { min-height: 32px; padding: 6px 11px; font-size: 12px; }
+            .sg-footer-credit { width: 100%; }
+            .sg-notice-card { margin-top: 10px; padding: 18px 16px; border-left-width: 5px; border-radius: 14px; }
+            .sg-notice-title { font-size: 20px; }
+            .sg-notice-intro, .sg-action-item { font-size: 15px; line-height: 1.65; }
 
             .sg-temp-password {
                 display: grid;
@@ -460,42 +470,31 @@ def apply_global_style():
                 padding: 13px 14px;
             }
 
-            .sg-temp-label {
-                white-space: normal;
-            }
+            .sg-temp-label { white-space: normal; }
+            .sg-temp-value { grid-column: 1 / -1; justify-self: stretch; text-align: center; font-size: 20px; }
+            .sg-action-box { padding: 14px; }
+            .sg-action-title { font-size: 16px; }
+            .sg-notice-foot { font-size: 14px; }
+            .sg-role-title { font-size: 1.7rem; }
 
-            .sg-temp-value {
-                grid-column: 1 / -1;
-                justify-self: stretch;
-                text-align: center;
-                font-size: 20px;
-            }
-
-            .sg-action-box {
-                padding: 14px;
-            }
-
-            .sg-action-title {
-                font-size: 16px;
-            }
-
-            .sg-notice-foot {
-                font-size: 14px;
-            }
-
-            .sg-role-title {
-                font-size: 1.7rem;
-            }
-
-            div[data-testid="stButton"] > button {
+            div[data-testid="stButton"] > button,
+            div[data-testid="stDownloadButton"] > button {
                 min-height: 4.25rem;
                 font-size: 0.95rem;
             }
         }
+
+        @supports not (color: color-mix(in srgb, white, black)) {
+            :root {
+                --sg-muted: var(--text-color);
+                --sg-border: rgba(128, 128, 128, 0.35);
+            }
+        }
         </style>
         """,
-        unsafe_allow_html=True
+        unsafe_allow_html=True,
     )
+
 
 
 # ---------------------- 배너 ----------------------
