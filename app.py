@@ -930,6 +930,80 @@ def hash_pw(pw: str) -> str:
     return hashlib.sha256(pw.encode("utf-8")).hexdigest()
 
 
+
+def find_signup_name_conflict(username: str) -> dict | None:
+    """
+    회원가입 이름이 기존 계정 또는 명단 학생 이름과 충돌하는지 확인합니다.
+
+    예:
+    - 명단 이름이 '양서율'인데 '양서율성신고'로 가입 시도
+    - 기존 계정이 '양서율'인데 '양서율1'로 가입 시도
+    위 경우 별도 계정 생성을 막고 관리자 문의를 안내합니다.
+    """
+    clean_name = re.sub(r"\s+", "", str(username or "").strip())
+
+    if not clean_name:
+        return None
+
+    user_rows = fetch_all_rows("users", "username")
+    roster_rows = fetch_all_rows("student_roster", "student_name,school_name")
+
+    existing_user_names = sorted(
+        {
+            re.sub(r"\s+", "", str(row.get("username", "")).strip())
+            for row in user_rows
+            if str(row.get("username", "")).strip()
+        },
+        key=len,
+        reverse=True,
+    )
+
+    roster_map: dict[str, str] = {}
+    for row in roster_rows:
+        roster_name = re.sub(
+            r"\s+",
+            "",
+            str(row.get("student_name", "")).strip(),
+        )
+        if roster_name:
+            roster_map.setdefault(
+                roster_name,
+                str(row.get("school_name", "")).strip(),
+            )
+
+    # 이미 정확히 같은 계정이 존재하는 경우
+    if clean_name in existing_user_names:
+        return {
+            "type": "existing_account",
+            "matched_name": clean_name,
+            "school_name": roster_map.get(clean_name, ""),
+        }
+
+    # 명단에 정확히 존재하는 이름이고 아직 계정이 없다면 정상 가입 허용
+    if clean_name in roster_map:
+        return None
+
+    candidate_names = sorted(
+        set(existing_user_names) | set(roster_map.keys()),
+        key=len,
+        reverse=True,
+    )
+
+    # 본인 이름 뒤에 학교명·숫자 등을 붙인 별도 계정 생성을 차단
+    for candidate in candidate_names:
+        if len(candidate) < 2:
+            continue
+
+        if clean_name.startswith(candidate) or candidate.startswith(clean_name):
+            return {
+                "type": "similar_name",
+                "matched_name": candidate,
+                "school_name": roster_map.get(candidate, ""),
+            }
+
+    return None
+
+
 def create_user(username: str, password: str, grade: str) -> bool:
     username = username.strip()
 
@@ -2801,6 +2875,182 @@ def delete_student_management(
     return result
 
 
+
+def get_account_wrong_answer_count(username: str) -> int:
+    response = (
+        supabase.table("wrong_answers")
+        .select("id", count="exact")
+        .eq("username", str(username or "").strip())
+        .execute()
+    )
+
+    if getattr(response, "count", None) is not None:
+        return int(response.count)
+
+    return len(response.data or [])
+
+
+def transfer_wrong_answers_between_accounts(
+    old_username: str,
+    new_username: str,
+    *,
+    delete_old_account: bool = False,
+) -> dict:
+    """
+    이전 계정의 오답 기록을 새 계정으로 안전하게 이전합니다.
+
+    - 새 계정에 이미 존재하는 동일 교재·문제번호는 중복 저장하지 않습니다.
+    - 이전이 끝난 기존 오답 행은 삭제합니다.
+    - 선택한 경우 오답이 모두 이전된 이전 계정도 삭제합니다.
+    """
+    old_username = str(old_username or "").strip()
+    new_username = str(new_username or "").strip()
+
+    if not old_username or not new_username:
+        raise ValueError("이전 계정과 새 계정을 모두 선택해주세요.")
+
+    if old_username == new_username:
+        raise ValueError("이전 계정과 새 계정이 같습니다.")
+
+    old_user = (
+        supabase.table("users")
+        .select("username")
+        .eq("username", old_username)
+        .limit(1)
+        .execute()
+    )
+
+    new_user = (
+        supabase.table("users")
+        .select("username")
+        .eq("username", new_username)
+        .limit(1)
+        .execute()
+    )
+
+    if not old_user.data:
+        raise ValueError("이전 계정을 찾을 수 없습니다.")
+
+    if not new_user.data:
+        raise ValueError(
+            "새 계정을 찾을 수 없습니다. "
+            "학생이 새 이름으로 먼저 회원가입했는지 확인해주세요."
+        )
+
+    old_rows = fetch_all_rows(
+        "wrong_answers",
+        "id,unit,problem,memo,created_at",
+        filters=[("username", "eq", old_username)],
+        order_column="id",
+        desc=False,
+    )
+
+    if not old_rows:
+        raise ValueError("이전 계정에 옮길 오답 기록이 없습니다.")
+
+    target_existing: dict[str, set[str]] = {}
+
+    target_rows = fetch_all_rows(
+        "wrong_answers",
+        "unit,problem",
+        filters=[("username", "eq", new_username)],
+        order_column="id",
+        desc=False,
+    )
+
+    for row in target_rows:
+        book = str(row.get("unit", "")).strip()
+        target_existing.setdefault(book, set()).update(
+            parse_problem_numbers(row.get("problem", ""))
+        )
+
+    inserted_rows = 0
+    deleted_rows = 0
+    moved_numbers = 0
+    skipped_duplicate_numbers = 0
+
+    for row in old_rows:
+        row_id = int(row["id"])
+        book = str(row.get("unit", "")).strip()
+        source_numbers = parse_problem_numbers(row.get("problem", ""))
+        existing_numbers = target_existing.setdefault(book, set())
+
+        new_numbers = [
+            number
+            for number in source_numbers
+            if number not in existing_numbers
+        ]
+
+        skipped_duplicate_numbers += (
+            len(source_numbers) - len(new_numbers)
+        )
+
+        if new_numbers:
+            (
+                supabase.table("wrong_answers")
+                .insert(
+                    {
+                        "username": new_username,
+                        "unit": book,
+                        "problem": format_problem_numbers(new_numbers),
+                        "memo": str(row.get("memo", "") or ""),
+                        "created_at": (
+                            row.get("created_at")
+                            or now_kst_iso()
+                        ),
+                    }
+                )
+                .execute()
+            )
+
+            existing_numbers.update(new_numbers)
+            moved_numbers += len(new_numbers)
+            inserted_rows += 1
+
+        # 새 계정에 이미 존재하는 문제까지 포함하여 이전 처리가 끝난 행 삭제
+        (
+            supabase.table("wrong_answers")
+            .delete()
+            .eq("id", row_id)
+            .execute()
+        )
+        deleted_rows += 1
+
+    old_account_deleted = False
+
+    if delete_old_account:
+        remaining = (
+            supabase.table("wrong_answers")
+            .select("id")
+            .eq("username", old_username)
+            .limit(1)
+            .execute()
+        )
+
+        if remaining.data:
+            raise ValueError(
+                "이전 계정에 오답 기록이 남아 있어 계정을 삭제하지 않았습니다."
+            )
+
+        (
+            supabase.table("users")
+            .delete()
+            .eq("username", old_username)
+            .execute()
+        )
+        old_account_deleted = True
+
+    cleanup_duplicate_wrong_answers()
+
+    return {
+        "inserted_rows": inserted_rows,
+        "deleted_rows": deleted_rows,
+        "moved_numbers": moved_numbers,
+        "skipped_duplicate_numbers": skipped_duplicate_numbers,
+        "old_account_deleted": old_account_deleted,
+    }
+
+
 def render_student_management():
     """관리자 전용 학생 통합 관리 화면입니다."""
     roster_df = get_roster_df()
@@ -2846,10 +3096,16 @@ def render_student_management():
         "담당 선생님·반·학교·교재는 선택한 수강 등록 행에만 반영됩니다."
     )
 
-    tab_name, tab_roster, tab_delete = st.tabs(
+    (
+        tab_name,
+        tab_roster,
+        tab_transfer,
+        tab_delete,
+    ) = st.tabs(
         [
             "✏️ 이름·학년 수정",
             "🏫 담당·반·학교·교재",
+            "🔄 오답 계정 이전",
             "🗑️ 학생 삭제",
         ]
     )
@@ -3086,6 +3342,118 @@ def render_student_management():
                         st.rerun()
                     except Exception as error:
                         st.error(f"수강 정보 변경 중 오류가 발생했습니다: {error}")
+
+    with tab_transfer:
+        st.markdown("#### 이전 계정의 오답을 새 계정으로 이전")
+        st.info(
+            "학생이 예전에 다른 이름으로 사용한 계정의 오답 기록을 "
+            "현재 본인 이름 계정으로 옮깁니다. "
+            "새 계정에 이미 있는 같은 교재·문제번호는 중복 저장하지 않습니다."
+        )
+
+        account_df = get_all_users()
+
+        if account_df.empty or len(account_df) < 2:
+            st.info("오답을 이전하려면 학생 계정이 2개 이상 필요합니다.")
+        else:
+            account_names = sorted(
+                account_df["학생"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+
+            old_account = st.selectbox(
+                "1. 이전 계정",
+                account_names,
+                key="answer_transfer_old_account",
+                help="오답 기록이 현재 저장되어 있는 예전 계정입니다.",
+            )
+
+            target_options = [
+                name
+                for name in account_names
+                if name != old_account
+            ]
+
+            new_account = st.selectbox(
+                "2. 새 계정",
+                target_options,
+                key="answer_transfer_new_account",
+                help="오답 기록을 받을 현재 본인 이름 계정입니다.",
+            )
+
+            old_count = get_account_wrong_answer_count(old_account)
+            new_count = get_account_wrong_answer_count(new_account)
+
+            count_col1, count_col2 = st.columns(2)
+            count_col1.metric(
+                f"{old_account} 기존 오답 행",
+                old_count,
+            )
+            count_col2.metric(
+                f"{new_account} 현재 오답 행",
+                new_count,
+            )
+
+            delete_old_after_transfer = st.checkbox(
+                "이전 완료 후 예전 계정도 삭제합니다.",
+                value=False,
+                key="answer_transfer_delete_old",
+                help=(
+                    "오답만 옮기고 계정은 유지하려면 체크하지 마세요. "
+                    "체크하면 이전 완료 후 예전 로그인 계정이 삭제됩니다."
+                ),
+            )
+
+            transfer_confirm_text = st.text_input(
+                f"실행하려면 새 계정 이름 '{new_account}'을 입력하세요.",
+                key="answer_transfer_confirm_text",
+            )
+
+            if st.button(
+                "오답 기록 이전 실행",
+                type="primary",
+                key="answer_transfer_execute",
+                use_container_width=True,
+            ):
+                if old_count == 0:
+                    st.warning("이전 계정에 옮길 오답 기록이 없습니다.")
+                elif transfer_confirm_text.strip() != new_account:
+                    st.warning("새 계정 이름을 정확히 입력해주세요.")
+                else:
+                    try:
+                        result = transfer_wrong_answers_between_accounts(
+                            old_account,
+                            new_account,
+                            delete_old_account=delete_old_after_transfer,
+                        )
+
+                        st.success(
+                            f"{old_account} → {new_account} 오답 이전을 완료했습니다."
+                        )
+                        st.write(
+                            f"- 새로 이전한 문제번호: "
+                            f"**{result['moved_numbers']}개**"
+                        )
+                        st.write(
+                            f"- 새 계정에 이미 있어 제외한 중복 번호: "
+                            f"**{result['skipped_duplicate_numbers']}개**"
+                        )
+                        st.write(
+                            f"- 처리한 이전 계정 오답 행: "
+                            f"**{result['deleted_rows']}건**"
+                        )
+
+                        if result["old_account_deleted"]:
+                            st.write("- 예전 계정도 삭제했습니다.")
+
+                        st.rerun()
+                    except Exception as error:
+                        st.error(
+                            f"오답 계정 이전 중 오류가 발생했습니다: {error}"
+                        )
 
     with tab_delete:
         st.warning(
@@ -3393,10 +3761,42 @@ def show_student():
                     st.warning("학생과 비밀번호를 입력해주세요.")
                 elif new_password != new_password2:
                     st.warning("비밀번호가 일치하지 않습니다.")
-                elif create_user(new_username.strip(), new_password, new_grade):
-                    st.success("회원가입이 완료되었습니다. 로그인 탭에서 로그인해주세요.")
                 else:
-                    st.error("이미 존재하는 학생입니다.")
+                    signup_conflict = find_signup_name_conflict(
+                        new_username.strip()
+                    )
+
+                    if signup_conflict:
+                        matched_name = signup_conflict["matched_name"]
+                        school_name = signup_conflict.get("school_name", "")
+                        matched_text = (
+                            f"{matched_name} ({school_name})"
+                            if school_name
+                            else matched_name
+                        )
+
+                        st.error(
+                            "중복 이름 계정으로 가입을 시도했습니다. "
+                            "관리자에게 오픈채팅으로 문의한 후 "
+                            "임시 비밀번호를 안내받아주세요."
+                        )
+                        st.caption(
+                            f"확인된 기존 이름 또는 계정: {matched_text}"
+                        )
+                    elif create_user(
+                        new_username.strip(),
+                        new_password,
+                        new_grade,
+                    ):
+                        st.success(
+                            "회원가입이 완료되었습니다. "
+                            "로그인 탭에서 로그인해주세요."
+                        )
+                    else:
+                        st.error(
+                            "계정을 생성하지 못했습니다. "
+                            "하단 오픈채팅으로 문의해주세요."
+                        )
 
         st.divider()
 
