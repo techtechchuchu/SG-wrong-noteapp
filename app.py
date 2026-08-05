@@ -573,6 +573,8 @@ def verify_supabase_connection():
         ("wrong_answers", "id"),
         ("student_roster", "id"),
         ("print_status", "id"),
+        ("school_exam_master", "id"),
+        ("school_exam_wrong_answers", "id"),
     ]
 
     for table_name, column_name in checks:
@@ -2893,6 +2895,885 @@ def render_student_signup_status():
             type="primary",
         )
 
+
+# ============================================================
+# 학교 기출 관리
+# ============================================================
+def make_school_exam_display_name(
+    exam_year: int,
+    school_name: str,
+    subject: str,
+    exam_type: str,
+) -> str:
+    parts = [
+        str(exam_year).strip(),
+        str(subject or "").strip(),
+        str(school_name or "").strip(),
+        str(exam_type or "").strip(),
+    ]
+    return " ".join(part for part in parts if part)
+
+
+def normalize_exam_year(value) -> int:
+    raw = re.sub(r"[^0-9]", "", str(value or ""))
+
+    if not raw:
+        raise ValueError("연도를 확인할 수 없습니다.")
+
+    year = int(raw)
+
+    if year < 100:
+        year += 2000
+
+    if year < 2000 or year > 2100:
+        raise ValueError("연도는 2000~2100 사이로 입력해주세요.")
+
+    return year
+
+
+def parse_school_exam_bulk_text(raw_text: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    관리자 메모장 복붙 내용을 학교 기출 목록으로 변환합니다.
+
+    권장 형식:
+    연도 | 학교 | 과목 | 시험구분 | 문항수 | 범위
+
+    예:
+    2025 | 울산고 | 미적분1 | 2학기 중간 | 30 | 함수의 극한~접선
+    2025 | 학성고 | 미적분1 | 2학기 중간 | 28 |
+
+    탭 또는 쉼표 구분도 허용합니다.
+    간단 형식 '2025 미적분1 울산고 시험'도 인식하지만,
+    정확한 등록을 위해 구분자 형식을 권장합니다.
+    """
+    valid_rows = []
+    error_rows = []
+
+    lines = [
+        line.strip()
+        for line in str(raw_text or "").splitlines()
+        if line.strip()
+    ]
+
+    for line_number, line in enumerate(lines, start=1):
+        try:
+            if "|" in line:
+                parts = [part.strip() for part in line.split("|")]
+            elif "\t" in line:
+                parts = [part.strip() for part in line.split("\t")]
+            elif "," in line and line.count(",") >= 3:
+                parts = [part.strip() for part in line.split(",")]
+            else:
+                # 간단 문장형 보조 인식
+                tokens = line.split()
+                if len(tokens) < 4:
+                    raise ValueError(
+                        "항목이 부족합니다. 연도 | 학교 | 과목 | 시험구분 형식으로 입력해주세요."
+                    )
+
+                year_token = tokens[0]
+                school_index = next(
+                    (
+                        index
+                        for index, token in enumerate(tokens[1:], start=1)
+                        if token.endswith(("고", "여고", "외고", "중"))
+                    ),
+                    None,
+                )
+
+                if school_index is None:
+                    raise ValueError("학교명을 확인할 수 없습니다.")
+
+                subject = tokens[1] if school_index != 1 else (
+                    tokens[2] if len(tokens) > 2 else ""
+                )
+                school_name = tokens[school_index]
+                exam_tokens = [
+                    token
+                    for index, token in enumerate(tokens[1:], start=1)
+                    if index not in {school_index}
+                    and token != subject
+                ]
+
+                parts = [
+                    year_token,
+                    school_name,
+                    subject,
+                    " ".join(exam_tokens) or "시험",
+                    "",
+                    "",
+                ]
+
+            parts += [""] * (6 - len(parts))
+            year_raw, school_name, subject, exam_type, question_count_raw, scope = parts[:6]
+
+            exam_year = normalize_exam_year(year_raw)
+            school_name = str(school_name).strip()
+            subject = str(subject).strip()
+            exam_type = str(exam_type).strip() or "시험"
+            scope = str(scope).strip()
+
+            if not school_name:
+                raise ValueError("학교가 비어 있습니다.")
+            if not subject:
+                raise ValueError("과목이 비어 있습니다.")
+
+            if str(question_count_raw).strip():
+                question_count = int(
+                    re.sub(r"[^0-9]", "", str(question_count_raw))
+                )
+                if question_count <= 0:
+                    raise ValueError("문항 수는 1 이상이어야 합니다.")
+            else:
+                question_count = None
+
+            display_name = make_school_exam_display_name(
+                exam_year,
+                school_name,
+                subject,
+                exam_type,
+            )
+
+            valid_rows.append(
+                {
+                    "줄번호": line_number,
+                    "연도": exam_year,
+                    "학교": school_name,
+                    "과목": subject,
+                    "시험구분": exam_type,
+                    "문항수": question_count,
+                    "범위": scope,
+                    "표시명": display_name,
+                    "원문": line,
+                }
+            )
+        except Exception as error:
+            error_rows.append(
+                {
+                    "줄번호": line_number,
+                    "원문": line,
+                    "오류": str(error),
+                }
+            )
+
+    valid_df = pd.DataFrame(
+        valid_rows,
+        columns=[
+            "줄번호", "연도", "학교", "과목", "시험구분",
+            "문항수", "범위", "표시명", "원문",
+        ],
+    )
+    error_df = pd.DataFrame(
+        error_rows,
+        columns=["줄번호", "원문", "오류"],
+    )
+
+    return valid_df, error_df
+
+
+def get_school_exam_master_df(active_only: bool = True) -> pd.DataFrame:
+    filters = [("is_active", "eq", True)] if active_only else []
+
+    rows = fetch_all_rows(
+        "school_exam_master",
+        (
+            "id,exam_year,school_name,subject,exam_type,"
+            "question_count,scope,display_name,is_active,created_at"
+        ),
+        filters=filters,
+        order_column="exam_year",
+        desc=True,
+    )
+
+    columns = [
+        "기출ID", "연도", "학교", "과목", "시험구분",
+        "문항수", "범위", "표시명", "사용중", "등록일시",
+    ]
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(
+        [
+            {
+                "기출ID": row.get("id"),
+                "연도": row.get("exam_year"),
+                "학교": row.get("school_name", ""),
+                "과목": row.get("subject", ""),
+                "시험구분": row.get("exam_type", ""),
+                "문항수": row.get("question_count"),
+                "범위": row.get("scope", ""),
+                "표시명": row.get("display_name", ""),
+                "사용중": bool(row.get("is_active", True)),
+                "등록일시": row.get("created_at", ""),
+            }
+            for row in rows
+        ],
+        columns=columns,
+    )
+
+
+def register_school_exam_rows(valid_df: pd.DataFrame) -> dict:
+    if valid_df.empty:
+        return {"created": 0, "skipped": 0}
+
+    existing_df = get_school_exam_master_df(active_only=False)
+    existing_keys = {
+        (
+            int(row["연도"]),
+            str(row["학교"]).strip(),
+            str(row["과목"]).strip(),
+            str(row["시험구분"]).strip(),
+        )
+        for _, row in existing_df.iterrows()
+    }
+
+    insert_rows = []
+    skipped = 0
+
+    for _, row in valid_df.iterrows():
+        key = (
+            int(row["연도"]),
+            str(row["학교"]).strip(),
+            str(row["과목"]).strip(),
+            str(row["시험구분"]).strip(),
+        )
+
+        if key in existing_keys:
+            skipped += 1
+            continue
+
+        insert_rows.append(
+            {
+                "exam_year": int(row["연도"]),
+                "school_name": str(row["학교"]).strip(),
+                "subject": str(row["과목"]).strip(),
+                "exam_type": str(row["시험구분"]).strip(),
+                "question_count": (
+                    int(row["문항수"])
+                    if pd.notna(row["문항수"])
+                    else None
+                ),
+                "scope": str(row["범위"] or "").strip(),
+                "display_name": str(row["표시명"]).strip(),
+                "is_active": True,
+                "created_at": now_kst_iso(),
+            }
+        )
+        existing_keys.add(key)
+
+    if insert_rows:
+        supabase.table("school_exam_master").insert(insert_rows).execute()
+
+    return {
+        "created": len(insert_rows),
+        "skipped": skipped,
+    }
+
+
+def set_school_exam_active(exam_id: int, is_active: bool):
+    (
+        supabase.table("school_exam_master")
+        .update({"is_active": bool(is_active)})
+        .eq("id", int(exam_id))
+        .execute()
+    )
+
+
+def get_existing_school_exam_numbers(
+    username: str,
+    exam_id: int,
+) -> set[str]:
+    rows = fetch_all_rows(
+        "school_exam_wrong_answers",
+        "problem",
+        filters=[
+            ("username", "eq", username),
+            ("exam_id", "eq", int(exam_id)),
+        ],
+    )
+
+    numbers = set()
+
+    for row in rows:
+        numbers.update(parse_problem_numbers(row.get("problem", "")))
+
+    return numbers
+
+
+def add_school_exam_wrong_answer(
+    username: str,
+    exam_id: int,
+    problem_number: str,
+    memo: str,
+) -> dict:
+    submitted_numbers = parse_problem_numbers(problem_number)
+
+    if not submitted_numbers:
+        return {
+            "saved": False,
+            "new_numbers": [],
+            "duplicate_numbers": [],
+            "message": "저장할 기출 오답번호가 없습니다.",
+        }
+
+    existing_numbers = get_existing_school_exam_numbers(
+        username,
+        exam_id,
+    )
+
+    new_numbers = [
+        number
+        for number in submitted_numbers
+        if number not in existing_numbers
+    ]
+    duplicate_numbers = [
+        number
+        for number in submitted_numbers
+        if number in existing_numbers
+    ]
+
+    if not new_numbers:
+        return {
+            "saved": False,
+            "new_numbers": [],
+            "duplicate_numbers": duplicate_numbers,
+            "message": "입력한 기출 오답번호가 모두 이미 저장되어 있습니다.",
+        }
+
+    (
+        supabase.table("school_exam_wrong_answers")
+        .insert(
+            {
+                "username": username,
+                "exam_id": int(exam_id),
+                "problem": format_problem_numbers(new_numbers),
+                "memo": str(memo or "").strip(),
+                "created_at": now_kst_iso(),
+            }
+        )
+        .execute()
+    )
+
+    return {
+        "saved": True,
+        "new_numbers": new_numbers,
+        "duplicate_numbers": duplicate_numbers,
+        "message": "학교 기출 오답을 저장했습니다.",
+    }
+
+
+def get_school_exam_wrong_answers_df() -> pd.DataFrame:
+    answer_rows = fetch_all_rows(
+        "school_exam_wrong_answers",
+        "id,username,exam_id,problem,memo,created_at",
+        order_column="id",
+        desc=True,
+    )
+    exam_df = get_school_exam_master_df(active_only=False)
+
+    columns = [
+        "기록ID", "학생", "기출ID", "연도", "학교", "과목",
+        "시험구분", "기출명", "문제번호", "비고", "작성일시",
+    ]
+
+    if not answer_rows:
+        return pd.DataFrame(columns=columns)
+
+    exam_map = {
+        int(row["기출ID"]): row
+        for _, row in exam_df.iterrows()
+    }
+
+    records = []
+
+    for row in answer_rows:
+        exam_id = int(row.get("exam_id"))
+        exam = exam_map.get(exam_id, {})
+
+        records.append(
+            {
+                "기록ID": row.get("id"),
+                "학생": row.get("username", ""),
+                "기출ID": exam_id,
+                "연도": exam.get("연도", ""),
+                "학교": exam.get("학교", ""),
+                "과목": exam.get("과목", ""),
+                "시험구분": exam.get("시험구분", ""),
+                "기출명": exam.get("표시명", f"기출 ID {exam_id}"),
+                "문제번호": row.get("problem", ""),
+                "비고": row.get("memo", ""),
+                "작성일시": row.get("created_at", ""),
+            }
+        )
+
+    return pd.DataFrame(records, columns=columns)
+
+
+def get_my_school_exam_wrong_answers(username: str) -> pd.DataFrame:
+    df = get_school_exam_wrong_answers_df()
+
+    if df.empty:
+        return df
+
+    return df[df["학생"] == username].copy()
+
+
+def merge_school_exam_answers_for_paper(
+    df: pd.DataFrame,
+) -> pd.DataFrame:
+    columns = [
+        "학생명", "연도", "학교", "과목", "시험구분",
+        "기출명", "문제번호", "비고", "PDF상단제목", "파일명",
+    ]
+
+    if df.empty:
+        return pd.DataFrame(columns=columns)
+
+    records = []
+
+    grouped = df.groupby(
+        ["학생", "연도", "학교", "과목", "시험구분", "기출명"],
+        sort=False,
+        dropna=False,
+    )
+
+    for (
+        student,
+        year,
+        school,
+        subject,
+        exam_type,
+        exam_name,
+    ), group in grouped:
+        numbers = []
+        memos = []
+
+        for _, row in group.iterrows():
+            for number in parse_problem_numbers(row["문제번호"]):
+                if number not in numbers:
+                    numbers.append(number)
+
+            memo = str(row.get("비고", "") or "").strip()
+            if memo and memo not in memos:
+                memos.append(memo)
+
+        title = f"{year} {subject} {school} {exam_type} 학교 기출 오답 Paper"
+
+        records.append(
+            {
+                "학생명": student,
+                "연도": year,
+                "학교": school,
+                "과목": subject,
+                "시험구분": exam_type,
+                "기출명": exam_name,
+                "문제번호": format_problem_numbers(numbers),
+                "비고": " / ".join(memos),
+                "PDF상단제목": title,
+                "파일명": (
+                    f"[학교기출오답][{school}][{student}]"
+                    f"[{year}_{subject}_{exam_type}].pdf"
+                ),
+            }
+        )
+
+    return pd.DataFrame(records, columns=columns)
+
+
+def render_student_school_exam_wrong_answer():
+    st.subheader("🏫 학교 기출 오답 작성")
+
+    st.warning(
+        "⚠️ 주의: 각 학교와 시험을 정확히 확인한 뒤 오답번호를 작성하세요. "
+        "잘못된 학교 기출을 선택하면 오답 Paper가 다른 시험으로 생성될 수 있습니다."
+    )
+
+    exam_df = get_school_exam_master_df(active_only=True)
+
+    if exam_df.empty:
+        st.info("현재 등록된 학교 기출 시험이 없습니다. 관리자에게 문의해주세요.")
+        return
+
+    school_options = sorted(
+        exam_df["학교"].dropna().astype(str).unique().tolist()
+    )
+
+    selected_school = st.selectbox(
+        "1. 학교 선택",
+        school_options,
+        key="student_school_exam_school",
+    )
+
+    school_df = exam_df[
+        exam_df["학교"] == selected_school
+    ].copy()
+
+    exam_option_map = {
+        int(row["기출ID"]): str(row["표시명"])
+        for _, row in school_df.sort_values(
+            by=["연도", "과목", "시험구분"],
+            ascending=[False, True, True],
+        ).iterrows()
+    }
+
+    selected_exam_id = st.selectbox(
+        "2. 학교 기출 시험 선택",
+        options=list(exam_option_map.keys()),
+        format_func=lambda exam_id: exam_option_map[exam_id],
+        key="student_school_exam_exam",
+    )
+
+    selected_exam = school_df[
+        school_df["기출ID"] == selected_exam_id
+    ].iloc[0]
+
+    st.info(
+        f"현재 선택: **{selected_exam['표시명']}**"
+        + (
+            f" · 범위: {selected_exam['범위']}"
+            if str(selected_exam["범위"]).strip()
+            else ""
+        )
+    )
+
+    problem_number = st.text_input(
+        "3. 기출 오답번호",
+        placeholder="예: 3, 7, 12, 18",
+        key="student_school_exam_problem",
+    )
+
+    memo = st.text_area(
+        "4. 비고",
+        placeholder="예: 계산 실수, 다시 질문 필요, 서술형 풀이 확인",
+        key="student_school_exam_memo",
+    )
+
+    confirm_exam = st.checkbox(
+        (
+            f"'{selected_exam['학교']}'의 "
+            f"'{selected_exam['표시명']}' 시험이 맞는지 확인했습니다."
+        ),
+        key="student_school_exam_confirm",
+    )
+
+    if st.button(
+        "학교 기출 오답 저장",
+        type="primary",
+        key="student_school_exam_save",
+        use_container_width=True,
+    ):
+        if not problem_number.strip():
+            st.warning("기출 오답번호를 입력해주세요.")
+        elif not confirm_exam:
+            st.error(
+                "학교와 시험을 다시 확인한 뒤 확인 항목에 체크해주세요."
+            )
+        else:
+            result = add_school_exam_wrong_answer(
+                st.session_state.student_user,
+                int(selected_exam_id),
+                problem_number,
+                memo,
+            )
+
+            if result["saved"]:
+                st.success(
+                    "학교 기출 오답을 저장했습니다: "
+                    + ", ".join(result["new_numbers"])
+                )
+
+                if result["duplicate_numbers"]:
+                    st.info(
+                        "이미 저장된 번호는 제외했습니다: "
+                        + ", ".join(result["duplicate_numbers"])
+                    )
+
+                st.rerun()
+            else:
+                st.warning(result["message"])
+
+    st.divider()
+    st.subheader("내 학교 기출 오답 목록")
+
+    my_df = get_my_school_exam_wrong_answers(
+        st.session_state.student_user
+    )
+
+    if my_df.empty:
+        st.info("아직 저장한 학교 기출 오답이 없습니다.")
+    else:
+        st.dataframe(
+            my_df[
+                [
+                    "연도", "학교", "과목", "시험구분",
+                    "기출명", "문제번호", "비고", "작성일시",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
+def render_teacher_school_exam_management():
+    st.subheader("🏫 학교 기출 오답 현황·Paper")
+
+    current_teacher = st.session_state.teacher_name
+    answer_df = get_school_exam_wrong_answers_df()
+
+    if answer_df.empty:
+        st.info("아직 등록된 학교 기출 오답이 없습니다.")
+        return
+
+    if current_teacher != ALL_TEACHER_ADMIN:
+        roster = get_roster_df()
+        teacher_students = set(
+            roster.loc[
+                roster["담당선생님"].apply(normalize_teacher_name)
+                == normalize_teacher_name(current_teacher),
+                "학생명",
+            ]
+            .dropna()
+            .astype(str)
+            .tolist()
+        )
+        answer_df = answer_df[
+            answer_df["학생"].isin(teacher_students)
+        ].copy()
+
+    if answer_df.empty:
+        st.info("현재 담당 학생의 학교 기출 오답이 없습니다.")
+        return
+
+    filter1, filter2, filter3 = st.columns(3)
+
+    with filter1:
+        school_filter = st.selectbox(
+            "학교 필터",
+            ["전체"] + sorted(
+                answer_df["학교"].dropna().astype(str).unique().tolist()
+            ),
+            key="teacher_school_exam_school_filter",
+        )
+
+    filtered_df = answer_df.copy()
+
+    if school_filter != "전체":
+        filtered_df = filtered_df[
+            filtered_df["학교"] == school_filter
+        ].copy()
+
+    with filter2:
+        subject_filter = st.selectbox(
+            "과목 필터",
+            ["전체"] + sorted(
+                filtered_df["과목"].dropna().astype(str).unique().tolist()
+            ),
+            key="teacher_school_exam_subject_filter",
+        )
+
+    if subject_filter != "전체":
+        filtered_df = filtered_df[
+            filtered_df["과목"] == subject_filter
+        ].copy()
+
+    with filter3:
+        exam_filter = st.selectbox(
+            "시험 필터",
+            ["전체"] + sorted(
+                filtered_df["기출명"].dropna().astype(str).unique().tolist()
+            ),
+            key="teacher_school_exam_exam_filter",
+        )
+
+    if exam_filter != "전체":
+        filtered_df = filtered_df[
+            filtered_df["기출명"] == exam_filter
+        ].copy()
+
+    student_options = sorted(
+        filtered_df["학생"].dropna().astype(str).unique().tolist()
+    )
+
+    selected_students = st.multiselect(
+        "Paper를 만들 학생 선택",
+        student_options,
+        default=student_options,
+        key="teacher_school_exam_students",
+    )
+
+    display_df = filtered_df[
+        filtered_df["학생"].isin(selected_students)
+    ].copy()
+
+    if display_df.empty:
+        st.info("현재 조건에 해당하는 기록이 없습니다.")
+        return
+
+    st.dataframe(
+        display_df[
+            [
+                "학생", "연도", "학교", "과목", "시험구분",
+                "기출명", "문제번호", "비고", "작성일시",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+        height=500,
+    )
+
+    paper_df = merge_school_exam_answers_for_paper(display_df)
+
+    st.download_button(
+        "학교 기출 오답 Paper 생성용 엑셀 다운로드",
+        data=dataframe_to_excel_bytes(paper_df),
+        file_name="학교_기출_오답Paper_생성용.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key="teacher_school_exam_paper_download",
+        type="primary",
+    )
+
+
+def render_school_exam_admin():
+    st.subheader("🏫 학교 기출 관리")
+
+    st.warning(
+        "등록 전에 연도·학교·과목·시험구분을 반드시 확인하세요. "
+        "학생은 여기에서 등록된 학교와 시험을 선택해 오답번호를 작성합니다."
+    )
+
+    st.markdown("#### 여러 기출 복붙 등록")
+    st.caption(
+        "권장 형식: 연도 | 학교 | 과목 | 시험구분 | 문항수 | 범위"
+    )
+    st.code(
+        "2025 | 울산고 | 미적분1 | 2학기 중간 | 30 | 함수의 극한~접선\n"
+        "2025 | 학성고 | 미적분1 | 2학기 중간 | 28 |",
+        language="text",
+    )
+
+    raw_text = st.text_area(
+        "메모장 내용을 그대로 붙여넣으세요.",
+        height=220,
+        key="school_exam_bulk_text",
+        placeholder=(
+            "2025 | 울산고 | 미적분1 | 2학기 중간 | 30 | 함수의 극한~접선\n"
+            "2025 | 학성고 | 미적분1 | 2학기 중간 | 28 |"
+        ),
+    )
+
+    if st.button(
+        "복붙 내용 미리보기",
+        key="school_exam_preview",
+        use_container_width=True,
+    ):
+        valid_df, error_df = parse_school_exam_bulk_text(raw_text)
+        st.session_state["school_exam_valid_preview"] = valid_df
+        st.session_state["school_exam_error_preview"] = error_df
+
+    valid_df = st.session_state.get(
+        "school_exam_valid_preview",
+        pd.DataFrame(),
+    )
+    error_df = st.session_state.get(
+        "school_exam_error_preview",
+        pd.DataFrame(),
+    )
+
+    if not valid_df.empty:
+        st.success(f"정상 인식: {len(valid_df)}건")
+        st.dataframe(
+            valid_df[
+                [
+                    "줄번호", "연도", "학교", "과목",
+                    "시험구분", "문항수", "범위", "표시명",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    if not error_df.empty:
+        st.error(f"오류 행: {len(error_df)}건")
+        st.dataframe(
+            error_df,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+    register_confirm = st.checkbox(
+        "미리보기의 정상 항목을 학교 기출 목록에 등록합니다.",
+        key="school_exam_register_confirm",
+    )
+
+    if st.button(
+        "정상 항목 일괄 등록",
+        type="primary",
+        key="school_exam_register",
+        use_container_width=True,
+        disabled=valid_df.empty,
+    ):
+        if not register_confirm:
+            st.warning("등록 확인 항목에 체크해주세요.")
+        else:
+            result = register_school_exam_rows(valid_df)
+            st.success(
+                f"신규 {result['created']}건 등록, "
+                f"중복 {result['skipped']}건 제외했습니다."
+            )
+            st.session_state.pop("school_exam_valid_preview", None)
+            st.session_state.pop("school_exam_error_preview", None)
+            st.rerun()
+
+    st.divider()
+    st.markdown("#### 현재 학교 기출 목록")
+
+    exam_df = get_school_exam_master_df(active_only=False)
+
+    if exam_df.empty:
+        st.info("등록된 학교 기출이 없습니다.")
+        return
+
+    st.dataframe(
+        exam_df,
+        use_container_width=True,
+        hide_index=True,
+        height=500,
+    )
+
+    option_map = {
+        int(row["기출ID"]): (
+            f"{row['표시명']} · "
+            + ("사용중" if row["사용중"] else "숨김")
+        )
+        for _, row in exam_df.iterrows()
+    }
+
+    selected_exam_id = st.selectbox(
+        "상태를 변경할 기출",
+        options=list(option_map.keys()),
+        format_func=lambda exam_id: option_map[exam_id],
+        key="school_exam_admin_selected",
+    )
+
+    selected_active = bool(
+        exam_df.loc[
+            exam_df["기출ID"] == selected_exam_id,
+            "사용중",
+        ].iloc[0]
+    )
+
+    if st.button(
+        "학생 화면에서 숨기기" if selected_active else "학생 화면에 다시 표시",
+        key="school_exam_toggle_active",
+        use_container_width=True,
+    ):
+        set_school_exam_active(
+            selected_exam_id,
+            not selected_active,
+        )
+        st.rerun()
+
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
 
@@ -4242,6 +5123,12 @@ def show_student():
 
         st.divider()
 
+
+        with st.expander("🏫 학교 기출 오답 작성", expanded=True):
+            render_student_school_exam_wrong_answer()
+
+        st.divider()
+
         with st.expander("🔐 비밀번호 변경", expanded=False):
             st.caption(
                 "임시 비밀번호로 로그인한 경우 본인만 아는 새 비밀번호로 변경해주세요."
@@ -4376,6 +5263,7 @@ def show_admin():
         tab_signup_status,
         tab_teacher_students,
         tab_paper,
+        tab_school_exam,
         tab_print,
     ) = st.tabs(
         [
@@ -4385,6 +5273,7 @@ def show_admin():
             "👤 가입 현황",
             "🏫 내 반 학생",
             "🧾 오답노트 만들기",
+            "🏫 학교 기출 오답",
             "🖨️ 출력 관리",
         ]
     )
@@ -4787,6 +5676,9 @@ def show_admin():
             else:
                 st.warning("오답노트를 만들 학생을 한 명 이상 선택해주세요.")
 
+    with tab_school_exam:
+        render_teacher_school_exam_management()
+
     with tab_print:
         render_print_management()
 
@@ -5002,6 +5894,11 @@ def show_superadmin():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_current_roster",
                 )
+
+        st.divider()
+
+        with st.expander("🏫 학교 기출 관리", expanded=False):
+            render_school_exam_admin()
 
         st.divider()
 
