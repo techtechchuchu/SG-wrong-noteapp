@@ -6058,12 +6058,37 @@ def show_admin():
                 teacher_roster["반명"] == selected_class
             ].copy()
 
+            active_books = get_active_book_names()
+
+            if not active_books:
+                st.error(
+                    "현재 사용 중인 교재가 없습니다. "
+                    "전체 관리자 화면의 교재 관리에서 교재를 먼저 등록해주세요."
+                )
+                selected_book = ""
+            else:
+                selected_book = st.selectbox(
+                    "3. 교재 선택",
+                    active_books,
+                    key="paper_book",
+                    help=(
+                        "선택한 교재에 저장된 오답번호만 "
+                        "오답 Paper 생성용 엑셀에 포함됩니다."
+                    ),
+                )
+
+                st.warning(
+                    f"⚠️ 현재 선택한 교재는 '{selected_book}'입니다. "
+                    "학생들이 이 교재에 입력한 오답만 포함됩니다. "
+                    "다운로드 전에 교재가 맞는지 다시 확인해주세요."
+                )
+
             student_options = sorted(
                 class_roster["학생명"].dropna().unique().tolist()
             )
 
             selected_students = st.multiselect(
-                "3. 오답노트를 만들 학생",
+                "4. 오답노트를 만들 학생",
                 student_options,
                 default=student_options,
                 key="paper_students",
@@ -6087,7 +6112,7 @@ def show_admin():
                     key="paper_week",
                 )
 
-            if not class_roster.empty:
+            if not class_roster.empty and selected_book:
                 sample = class_roster.iloc[0]
                 title_preview = build_paper_title(
                     selected_teacher,
@@ -6105,7 +6130,7 @@ def show_admin():
                     "선생님·반·교재 정보에 맞춰 자동 생성합니다."
                 )
 
-            if selected_students:
+            if selected_students and selected_book:
                 export_df = build_claude_export_df(
                     selected_teacher,
                     selected_class,
@@ -6173,8 +6198,14 @@ def show_admin():
                     "이 버튼을 누르면 엑셀 다운로드와 동시에 선택 학생이 "
                     "출력 관리 탭의 미출력 목록에 자동 등록됩니다."
                 )
+            elif not selected_book:
+                st.warning(
+                    "오답노트를 만들 교재를 먼저 선택해주세요."
+                )
             else:
-                st.warning("오답노트를 만들 학생을 한 명 이상 선택해주세요.")
+                st.warning(
+                    "오답노트를 만들 학생을 한 명 이상 선택해주세요."
+                )
 
     with tab_school_exam:
         render_teacher_school_exam_management()
