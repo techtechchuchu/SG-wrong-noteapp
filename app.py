@@ -639,6 +639,32 @@ def fetch_all_rows(
 
 
 # ---------------------- 학생 명단·반·교재 관리 ----------------------
+def normalize_teacher_name(value) -> str:
+    """
+    담당 선생님 표기의 공백·점·영문 대소문자 차이를 자동 통일합니다.
+
+    예:
+    - 노대근T / 노대근.T / 노대근t / 노대근.t → 노대근.T
+    - 이주백T / 이주백.T / 이주백t / 이주백.t → 이주백.T
+    - 새 선생님도 이름 뒤에 T 또는 t가 있으면 자동으로 '이름.T'로 변환됩니다.
+    """
+    raw = str(value or "").strip()
+
+    if not raw:
+        return ""
+
+    compact = re.sub(r"\s+", "", raw)
+
+    # 이름 뒤의 T, t, .T, .t를 모두 제거한 뒤 표준 '.T'를 붙입니다.
+    teacher_match = re.fullmatch(r"(.+?)(?:\.?[Tt])", compact)
+
+    if teacher_match:
+        teacher_base = teacher_match.group(1).rstrip(".")
+        return f"{teacher_base}.T"
+
+    return raw
+
+
 def normalize_roster_grade(value) -> str:
     """엑셀의 1, 2, 3 또는 고1, 고2 형식을 앱 학년 형식으로 통일합니다."""
     raw = str(value or "").strip()
@@ -677,7 +703,9 @@ def get_roster_df() -> pd.DataFrame:
             {
                 "기록ID": row.get("id"),
                 "반명": row.get("class_name", ""),
-                "담당선생님": row.get("teacher_name", ""),
+                "담당선생님": normalize_teacher_name(
+                    row.get("teacher_name", "")
+                ),
                 "학생명": row.get("student_name", ""),
                 "학교명": row.get("school_name", ""),
                 "학년": row.get("grade", ""),
@@ -706,6 +734,9 @@ def import_roster_from_excel(uploaded_file) -> dict:
     for column in ["반명", "담당선생님", "학생명", "학교명", "매칭교재"]:
         clean_df[column] = clean_df[column].fillna("").astype(str).str.strip()
 
+    clean_df["담당선생님"] = clean_df["담당선생님"].apply(
+        normalize_teacher_name
+    )
     clean_df["학년"] = clean_df["학년"].apply(normalize_roster_grade)
     clean_df = clean_df[
         (clean_df["학생명"] != "")
@@ -2523,6 +2554,345 @@ def render_weekly_missing_students():
         type="primary",
     )
 
+
+def get_student_signup_status_df(
+    current_teacher: str,
+) -> pd.DataFrame:
+    """
+    학생 명단과 실제 users 계정을 비교하여 가입 상태를 계산합니다.
+
+    상태:
+    - 가입 완료: 명단 학생명과 계정명이 정확히 일치
+    - 유사 계정 있음: 이름 뒤에 학교명·숫자 등이 붙은 유사 계정 존재
+    - 미가입: 정확하거나 유사한 계정이 없음
+    """
+    roster = get_roster_df()
+
+    output_columns = [
+        "담당선생님",
+        "학생명",
+        "학교명",
+        "학년",
+        "소속반",
+        "가입상태",
+        "계정명",
+        "가입일시",
+        "오답개수",
+    ]
+
+    if roster.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    if current_teacher != ALL_TEACHER_ADMIN:
+        normalized_current_teacher = normalize_teacher_name(
+            current_teacher
+        )
+        roster = roster[
+            roster["담당선생님"].apply(normalize_teacher_name)
+            == normalized_current_teacher
+        ].copy()
+
+    if roster.empty:
+        return pd.DataFrame(columns=output_columns)
+
+    users_df = get_all_users()
+
+    if users_df.empty:
+        users_df = pd.DataFrame(
+            columns=["학생", "학년", "가입일시", "오답개수"]
+        )
+
+    account_map = {
+        str(row["학생"]).strip(): {
+            "가입일시": row.get("가입일시", ""),
+            "오답개수": int(row.get("오답개수", 0) or 0),
+        }
+        for _, row in users_df.iterrows()
+        if str(row.get("학생", "")).strip()
+    }
+
+    account_names = sorted(
+        account_map.keys(),
+        key=lambda value: (len(value), value),
+    )
+
+    grouped_roster = (
+        roster.groupby(
+            [
+                "담당선생님",
+                "학생명",
+                "학교명",
+                "학년",
+            ],
+            dropna=False,
+            sort=False,
+        )["반명"]
+        .apply(
+            lambda values: ", ".join(
+                dict.fromkeys(
+                    str(value).strip()
+                    for value in values
+                    if str(value).strip()
+                )
+            )
+        )
+        .reset_index(name="소속반")
+    )
+
+    records = []
+
+    for _, student in grouped_roster.iterrows():
+        student_name = str(student["학생명"]).strip()
+        compact_student_name = re.sub(r"\\s+", "", student_name)
+
+        exact_account = (
+            student_name
+            if student_name in account_map
+            else None
+        )
+
+        similar_accounts = []
+
+        if exact_account is None:
+            for account_name in account_names:
+                compact_account_name = re.sub(
+                    r"\\s+",
+                    "",
+                    account_name,
+                )
+
+                if not compact_account_name:
+                    continue
+
+                if (
+                    compact_account_name.startswith(
+                        compact_student_name
+                    )
+                    or compact_student_name.startswith(
+                        compact_account_name
+                    )
+                ):
+                    similar_accounts.append(account_name)
+
+        if exact_account:
+            signup_status = "가입 완료"
+            account_display = exact_account
+            joined_at = account_map[exact_account]["가입일시"]
+            answer_count = account_map[exact_account]["오답개수"]
+        elif similar_accounts:
+            signup_status = "유사 계정 있음"
+            account_display = ", ".join(similar_accounts)
+            joined_at = ", ".join(
+                str(account_map[name]["가입일시"])
+                for name in similar_accounts
+                if str(account_map[name]["가입일시"]).strip()
+            )
+            answer_count = sum(
+                int(account_map[name]["오답개수"])
+                for name in similar_accounts
+            )
+        else:
+            signup_status = "미가입"
+            account_display = ""
+            joined_at = ""
+            answer_count = 0
+
+        records.append(
+            {
+                "담당선생님": normalize_teacher_name(
+                    student["담당선생님"]
+                ),
+                "학생명": student_name,
+                "학교명": student["학교명"],
+                "학년": student["학년"],
+                "소속반": student["소속반"],
+                "가입상태": signup_status,
+                "계정명": account_display,
+                "가입일시": joined_at,
+                "오답개수": answer_count,
+            }
+        )
+
+    return pd.DataFrame(records, columns=output_columns)
+
+
+def render_student_signup_status():
+    """선생님 및 전체 관리자용 담당 학생 가입 현황 화면입니다."""
+    current_teacher = st.session_state.teacher_name
+    status_df = get_student_signup_status_df(current_teacher)
+
+    st.info(
+        "학생 명단과 실제 가입 계정을 비교합니다. "
+        "명단 이름과 정확히 일치하면 가입 완료, "
+        "이름 뒤에 학교명이나 숫자가 붙은 계정은 유사 계정으로 표시됩니다."
+    )
+
+    if status_df.empty:
+        st.info("확인할 담당 학생 명단이 없습니다.")
+        return
+
+    total_count = len(status_df)
+    joined_count = int(
+        (status_df["가입상태"] == "가입 완료").sum()
+    )
+    similar_count = int(
+        (status_df["가입상태"] == "유사 계정 있음").sum()
+    )
+    missing_count = int(
+        (status_df["가입상태"] == "미가입").sum()
+    )
+    joined_rate = (
+        round(joined_count / total_count * 100, 1)
+        if total_count
+        else 0.0
+    )
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("담당 학생", total_count)
+    col2.metric("가입 완료", joined_count)
+    col3.metric("유사 계정", similar_count)
+    col4.metric("미가입", missing_count)
+    col5.metric("정상 가입률", f"{joined_rate}%")
+
+    filter_col1, filter_col2 = st.columns(2)
+
+    with filter_col1:
+        status_filter = st.selectbox(
+            "가입 상태 필터",
+            [
+                "전체",
+                "가입 완료",
+                "유사 계정 있음",
+                "미가입",
+            ],
+            key="student_signup_status_filter",
+        )
+
+    with filter_col2:
+        class_options = ["전체"] + sorted(
+            {
+                class_name.strip()
+                for class_list in status_df["소속반"].fillna("")
+                for class_name in str(class_list).split(",")
+                if class_name.strip()
+            }
+        )
+
+        class_filter = st.selectbox(
+            "반 필터",
+            class_options,
+            key="student_signup_class_filter",
+        )
+
+    display_df = status_df.copy()
+
+    if status_filter != "전체":
+        display_df = display_df[
+            display_df["가입상태"] == status_filter
+        ].copy()
+
+    if class_filter != "전체":
+        display_df = display_df[
+            display_df["소속반"]
+            .fillna("")
+            .astype(str)
+            .str.split(",")
+            .apply(
+                lambda values: class_filter
+                in [value.strip() for value in values]
+            )
+        ].copy()
+
+    if display_df.empty:
+        st.info("현재 필터 조건에 해당하는 학생이 없습니다.")
+        return
+
+    status_order = {
+        "유사 계정 있음": 0,
+        "미가입": 1,
+        "가입 완료": 2,
+    }
+
+    display_df["_상태정렬"] = display_df["가입상태"].map(
+        status_order
+    ).fillna(9)
+
+    display_df = (
+        display_df.sort_values(
+            by=["_상태정렬", "소속반", "학생명"],
+            ascending=[True, True, True],
+        )
+        .drop(columns=["_상태정렬"])
+        .reset_index(drop=True)
+    )
+
+    st.caption(
+        "유사 계정은 관리자 화면의 '오답 계정 이전' 기능으로 "
+        "본인 이름 계정에 기록을 옮길 수 있습니다."
+    )
+
+    st.dataframe(
+        display_df,
+        use_container_width=True,
+        hide_index=True,
+        height=560,
+        column_config={
+            "가입상태": st.column_config.TextColumn(
+                "가입상태",
+                help=(
+                    "가입 완료: 정확한 이름 계정 존재 / "
+                    "유사 계정 있음: 학교명·숫자 등이 붙은 계정 존재 / "
+                    "미가입: 관련 계정 없음"
+                ),
+            ),
+            "오답개수": st.column_config.NumberColumn(
+                "오답개수",
+                format="%d",
+            ),
+        },
+    )
+
+    st.download_button(
+        "현재 가입 현황 엑셀 다운로드",
+        data=dataframe_to_excel_bytes(display_df),
+        file_name=(
+            "전체관리자_학생가입현황.xlsx"
+            if current_teacher == ALL_TEACHER_ADMIN
+            else f"{normalize_teacher_name(current_teacher)}_담당학생가입현황.xlsx"
+        ),
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        key="download_student_signup_status",
+    )
+
+    issue_df = status_df[
+        status_df["가입상태"].isin(
+            ["유사 계정 있음", "미가입"]
+        )
+    ].copy()
+
+    if not issue_df.empty:
+        st.download_button(
+            "유사 계정·미가입 학생만 엑셀 다운로드",
+            data=dataframe_to_excel_bytes(issue_df),
+            file_name=(
+                "전체관리자_유사계정_미가입학생.xlsx"
+                if current_teacher == ALL_TEACHER_ADMIN
+                else (
+                    f"{normalize_teacher_name(current_teacher)}_"
+                    "유사계정_미가입학생.xlsx"
+                )
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            key="download_student_signup_issues",
+            type="primary",
+        )
+
 def dataframe_to_excel_bytes(df: pd.DataFrame) -> bytes:
     output = io.BytesIO()
 
@@ -4003,6 +4373,7 @@ def show_admin():
         tab_answers,
         tab_weekly_submission,
         tab_weekly_missing,
+        tab_signup_status,
         tab_teacher_students,
         tab_paper,
         tab_print,
@@ -4011,6 +4382,7 @@ def show_admin():
             "📋 전체 오답 현황",
             "📅 주간 제출 현황",
             "🚨 미제출 학생 보기",
+            "👤 가입 현황",
             "🏫 내 반 학생",
             "🧾 오답노트 만들기",
             "🖨️ 출력 관리",
@@ -4140,6 +4512,9 @@ def show_admin():
 
     with tab_weekly_missing:
         render_weekly_missing_students()
+
+    with tab_signup_status:
+        render_student_signup_status()
 
     with tab_teacher_students:
         status_df = get_teacher_student_status_df()
