@@ -1,4 +1,4 @@
-import io
+mport io
 import base64
 import re
 import hashlib
@@ -4852,6 +4852,128 @@ def _resolve_grade_student(
     return candidate, "반영 가능"
 
 
+
+def _find_split_ox_question_row(
+    raw_df: pd.DataFrame,
+    header_row: int,
+) -> tuple[int | None, list[tuple[int, int]]]:
+    """
+    2단 헤더 채점결과를 인식합니다.
+
+    예:
+        1행: 이미지 | 성명 | ... | 문항별 OX | (병합/빈칸...)
+        2행:                            1 | 2 | 3 | ... | 22
+        3행: 학생A                     O | O | X | ...
+    """
+    max_scan_row = min(len(raw_df), header_row + 5)
+    best_row = None
+    best_questions = []
+
+    for row_index in range(header_row + 1, max_scan_row):
+        questions = []
+
+        for col_index in range(raw_df.shape[1]):
+            question_number = _extract_question_header(
+                raw_df.iat[row_index, col_index]
+            )
+
+            if question_number is not None:
+                questions.append((col_index, question_number))
+
+        # 문항번호가 여러 개 연속해서 존재하는 행만 OX 문항 헤더로 인정
+        if len(questions) >= 3:
+            # 실제 시험 문항처럼 번호가 증가하는지 확인
+            numbers = [number for _, number in questions]
+            increasing_pairs = sum(
+                1
+                for left, right in zip(numbers, numbers[1:])
+                if right > left
+            )
+
+            if increasing_pairs >= max(1, len(numbers) - 2):
+                if len(questions) > len(best_questions):
+                    best_row = row_index
+                    best_questions = questions
+
+    return best_row, best_questions
+
+
+def _find_grade_name_column(
+    raw_df: pd.DataFrame,
+    header_row: int,
+) -> int | None:
+    aliases = {
+        re.sub(r"\s+", "", alias)
+        for alias in GRADE_NAME_ALIASES
+    }
+
+    for col_index in range(raw_df.shape[1]):
+        value = re.sub(
+            r"\s+",
+            "",
+            _grade_cell_text(raw_df.iat[header_row, col_index]),
+        )
+
+        if value in aliases:
+            return col_index
+
+    return None
+
+
+def _find_grade_summary_columns(
+    raw_df: pd.DataFrame,
+    header_row: int,
+) -> tuple[list[int], list[int]]:
+    wrong_aliases = {
+        re.sub(r"\s+", "", alias)
+        for alias in GRADE_WRONG_SUMMARY_ALIASES
+    }
+    pattern_aliases = {
+        re.sub(r"\s+", "", alias)
+        for alias in GRADE_PATTERN_ALIASES
+    }
+
+    wrong_columns = []
+    pattern_columns = []
+
+    for col_index in range(raw_df.shape[1]):
+        value = re.sub(
+            r"\s+",
+            "",
+            _grade_cell_text(raw_df.iat[header_row, col_index]),
+        )
+
+        if value in wrong_aliases:
+            wrong_columns.append(col_index)
+
+        if value in pattern_aliases:
+            pattern_columns.append(col_index)
+
+    return wrong_columns, pattern_columns
+
+
+def _row_has_any_ox_mark(
+    raw_df: pd.DataFrame,
+    row_index: int,
+    question_columns: list[tuple[int, int]],
+) -> bool:
+    valid_marks = {
+        "O", "○", "◯", "⭕",
+        "X", "×", "✕", "✗",
+    }
+
+    for col_index, _ in question_columns:
+        value = re.sub(
+            r"\s+",
+            "",
+            _grade_cell_text(raw_df.iat[row_index, col_index]),
+        ).upper()
+
+        if value in valid_marks:
+            return True
+
+    return False
+
 def analyze_grading_result_file(
     uploaded_file,
     current_teacher: str,
@@ -4890,6 +5012,8 @@ def analyze_grading_result_file(
     records = []
     detected_question_max = 0
     parsed_sheet_count = 0
+    detected_ox_rows = 0
+    detected_ox_cells = 0
 
     for sheet_name, raw_df in sheets.items():
         if raw_df is None or raw_df.empty:
@@ -4899,69 +5023,80 @@ def analyze_grading_result_file(
         if header_row is None:
             continue
 
-        headers = _make_unique_headers(
-            raw_df.iloc[header_row].tolist()
+        # --------------------------------------------------------
+        # 1. 성명 열을 실제 열 번호로 찾기
+        # --------------------------------------------------------
+        name_col_index = _find_grade_name_column(
+            raw_df,
+            header_row,
         )
-        data_df = raw_df.iloc[header_row + 1:].copy()
-        data_df.columns = headers
-        data_df = data_df.reset_index(drop=True)
 
-        normalized_headers = {
-            column: re.sub(r"\s+", "", str(column))
-            for column in data_df.columns
-        }
-
-        name_columns = [
-            column
-            for column, normalized in normalized_headers.items()
-            if normalized in {
-                re.sub(r"\s+", "", alias)
-                for alias in GRADE_NAME_ALIASES
-            }
-        ]
-
-        if not name_columns:
+        if name_col_index is None:
             continue
 
-        name_column = name_columns[0]
+        # --------------------------------------------------------
+        # 2. 2단 헤더 구조 감지
+        #
+        # 1행: 성명 ... 문항별 OX
+        # 2행:           1 2 3 4 ... 22
+        # 3행~: 학생별 O / X
+        # --------------------------------------------------------
+        question_row, split_question_columns = (
+            _find_split_ox_question_row(
+                raw_df,
+                header_row,
+            )
+        )
 
-        wrong_summary_columns = [
-            column
-            for column, normalized in normalized_headers.items()
-            if normalized in {
-                re.sub(r"\s+", "", alias)
-                for alias in GRADE_WRONG_SUMMARY_ALIASES
-            }
-        ]
+        wrong_summary_columns, pattern_columns = (
+            _find_grade_summary_columns(
+                raw_df,
+                header_row,
+            )
+        )
 
-        pattern_columns = [
-            column
-            for column, normalized in normalized_headers.items()
-            if normalized in {
-                re.sub(r"\s+", "", alias)
-                for alias in GRADE_PATTERN_ALIASES
-            }
-        ]
+        if question_row is not None and split_question_columns:
+            data_start_row = question_row + 1
+            question_columns = split_question_columns
+        else:
+            # ----------------------------------------------------
+            # 기존 1단 헤더 파일도 계속 지원
+            # ----------------------------------------------------
+            data_start_row = header_row + 1
+            question_columns = []
 
-        question_columns = []
-        for column in data_df.columns:
-            question_number = _extract_question_header(column)
-            if question_number is not None:
-                question_columns.append((column, question_number))
-                detected_question_max = max(
-                    detected_question_max,
-                    question_number,
+            for col_index in range(raw_df.shape[1]):
+                question_number = _extract_question_header(
+                    raw_df.iat[header_row, col_index]
                 )
+
+                if question_number is not None:
+                    question_columns.append(
+                        (col_index, question_number)
+                    )
+
+        if question_columns:
+            detected_question_max = max(
+                detected_question_max,
+                max(
+                    question_number
+                    for _, question_number in question_columns
+                ),
+            )
 
         parsed_sheet_count += 1
 
-        for _, row in data_df.iterrows():
-            raw_student = _grade_cell_text(row.get(name_column))
+        # --------------------------------------------------------
+        # 3. 학생 행을 직접 열 인덱스로 읽기
+        # --------------------------------------------------------
+        for row_index in range(data_start_row, len(raw_df)):
+            raw_student = _grade_cell_text(
+                raw_df.iat[row_index, name_col_index]
+            )
 
             if not raw_student:
                 continue
 
-            # 합계, 평균 등 학생이 아닌 행 제외
             if any(
                 token in raw_student
                 for token in ["합계", "평균", "총점", "전체"]
@@ -4970,36 +5105,99 @@ def analyze_grading_result_file(
 
             wrong_numbers = []
 
+            # ----------------------------------------------------
+            # A. 오답번호 열이 따로 있는 파일
+            # ----------------------------------------------------
             if wrong_summary_columns:
-                value = row.get(wrong_summary_columns[0])
-                wrong_numbers = parse_problem_numbers(
-                    _grade_cell_text(value)
+                summary_value = _grade_cell_text(
+                    raw_df.iat[
+                        row_index,
+                        wrong_summary_columns[0],
+                    ]
                 )
 
-            if not wrong_numbers and pattern_columns:
-                pattern = _grade_cell_text(
-                    row.get(pattern_columns[0])
+                wrong_numbers = parse_problem_numbers(
+                    summary_value
                 )
+
+            # ----------------------------------------------------
+            # B. 정오표 문자열이 한 셀에 들어간 파일
+            # ----------------------------------------------------
+            if not wrong_numbers and pattern_columns:
+                pattern_value = _grade_cell_text(
+                    raw_df.iat[
+                        row_index,
+                        pattern_columns[0],
+                    ]
+                )
+
                 symbols = [
-                    ch
-                    for ch in pattern
-                    if ch not in {" ", ",", "|", "/", "-", "_"}
+                    char
+                    for char in pattern_value
+                    if char not in {
+                        " ", ",", "|", "/", "-", "_",
+                    }
                 ]
+
                 wrong_numbers = [
                     str(index + 1)
                     for index, symbol in enumerate(symbols)
                     if _is_wrong_grade_mark(symbol)
                 ]
+
                 if symbols:
                     detected_question_max = max(
                         detected_question_max,
                         len(symbols),
                     )
 
-            if not wrong_numbers and question_columns:
-                for column, question_number in question_columns:
-                    if _is_wrong_grade_mark(row.get(column)):
-                        wrong_numbers.append(str(question_number))
+            # ----------------------------------------------------
+            # C. 네 파일 구조:
+            #    문항번호 열의 같은 위치에서 X만 오답 처리
+            # ----------------------------------------------------
+            if question_columns:
+                row_has_ox = _row_has_any_ox_mark(
+                    raw_df,
+                    row_index,
+                    question_columns,
+                )
+
+                if row_has_ox:
+                    detected_ox_rows += 1
+
+                ox_wrong_numbers = []
+
+                for col_index, question_number in question_columns:
+                    cell_value = _grade_cell_text(
+                        raw_df.iat[row_index, col_index]
+                    )
+
+                    compact_value = re.sub(
+                        r"\s+",
+                        "",
+                        cell_value,
+                    ).upper()
+
+                    if compact_value in {
+                        "O", "○", "◯", "⭕",
+                        "X", "×", "✕", "✗",
+                    }:
+                        detected_ox_cells += 1
+
+                    # X만 오답으로 처리
+                    if _is_wrong_grade_mark(cell_value):
+                        ox_wrong_numbers.append(
+                            str(question_number)
+                        )
+
+                # 문항별 O/X가 실제로 존재하면
+                # 다른 방식보다 이 결과를 최우선으로 사용
+                if row_has_ox:
+                    wrong_numbers = ox_wrong_numbers
+
+            wrong_numbers = list(
+                dict.fromkeys(wrong_numbers)
+            )
 
             matched_student, status = _resolve_grade_student(
                 raw_student,
@@ -5014,7 +5212,9 @@ def analyze_grading_result_file(
                     "시트": str(sheet_name),
                     "원본학생명": raw_student,
                     "매칭학생": matched_student,
-                    "오답번호": format_problem_numbers(wrong_numbers),
+                    "오답번호": format_problem_numbers(
+                        wrong_numbers
+                    ),
                     "오답개수": len(wrong_numbers),
                     "상태": status,
                 }
@@ -5023,14 +5223,27 @@ def analyze_grading_result_file(
     if not records:
         raise ValueError(
             "학생명과 오답 문항을 자동 인식하지 못했습니다. "
-            "파일의 학생명 열과 문항별 O/X 또는 오답번호 열을 확인해주세요."
+            "파일의 성명 열과 문항별 O/X 영역을 확인해주세요."
         )
 
     preview_df = pd.DataFrame(records)
 
+    # ------------------------------------------------------------
+    # 안전장치:
+    # 문항번호는 인식했는데 O/X 셀을 하나도 못 읽은 경우
+    # DB 반영 전 분석 실패로 처리
+    # ------------------------------------------------------------
+    if detected_question_max > 0 and detected_ox_cells == 0:
+        raise ValueError(
+            "문항번호는 인식했지만 학생별 O/X 값을 읽지 못했습니다. "
+            "원본 파일의 '문항별 OX' 영역을 확인해주세요."
+        )
+
     info = {
         "sheet_count": parsed_sheet_count,
         "question_count": detected_question_max or None,
+        "detected_ox_rows": detected_ox_rows,
+        "detected_ox_cells": detected_ox_cells,
         "file_hash": hashlib.sha256(file_bytes).hexdigest(),
         "file_name": filename,
         "file_size": len(file_bytes),
