@@ -2,6 +2,7 @@ import io
 import base64
 import re
 import hashlib
+import html
 from collections import Counter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -517,20 +518,261 @@ def show_banner():
 
 
 
-def show_account_notice():
-    """역할 선택 및 로그인 화면에 계정 정리 공지를 표시합니다."""
-    notice_html = (
-        '<div class="sg-account-notice">'
-        '<div class="sg-account-notice-title">📢 계정 이용 안내</div>'
-        '<div class="sg-account-notice-text">'
-        '기존 학생들의 <strong>중복 계정을 정리</strong>했습니다.<br>'
-        '모든 학생 계정은 <strong>본인 이름으로 수정 완료</strong>했습니다.<br>'
-        '<strong>비밀번호 오류 및 계정 관리 등 문의사항은 화면 하단의 '
-        '오픈채팅 문의를 이용해주시기 바랍니다.</strong>'
-        '</div>'
-        '</div>'
+def get_active_notices(target: str = "all") -> list[dict]:
+    """현재 활성화된 공지를 우선순위 순서로 조회합니다."""
+    rows = fetch_all_rows(
+        "notices",
+        "id,title,content,target,is_active,priority,created_at,updated_at",
+        filters=[("is_active", "eq", True)],
+        order_column="priority",
+        desc=True,
     )
-    st.markdown(notice_html, unsafe_allow_html=True)
+
+    allowed_targets = {"all", str(target or "all").strip()}
+    return [
+        row
+        for row in rows
+        if str(row.get("target", "all")).strip() in allowed_targets
+    ]
+
+
+def show_account_notice(target: str = "all"):
+    """로그인·역할 선택 화면에 관리자 DB 공지를 표시합니다."""
+    try:
+        notices = get_active_notices(target)
+    except Exception:
+        notices = []
+
+    if not notices:
+        # 최초 SQL 실행 직후 공지가 아직 없을 때의 기본 안내
+        notices = [
+            {
+                "title": "📢 계정 이용 안내",
+                "content": (
+                    "비밀번호 오류 및 계정 관리 등 문의사항은 "
+                    "화면 하단의 오픈채팅 문의를 이용해주시기 바랍니다."
+                ),
+            }
+        ]
+
+    for notice in notices:
+        title = html.escape(str(notice.get("title", "공지사항") or "공지사항"))
+        content = html.escape(str(notice.get("content", "") or ""))
+        content = content.replace("\n", "<br>")
+
+        notice_html = (
+            '<div class="sg-account-notice">'
+            f'<div class="sg-account-notice-title">{title}</div>'
+            '<div class="sg-account-notice-text">'
+            f'{content}'
+            '</div>'
+            '</div>'
+        )
+        st.markdown(notice_html, unsafe_allow_html=True)
+
+
+def get_all_notices_df() -> pd.DataFrame:
+    rows = fetch_all_rows(
+        "notices",
+        "id,title,content,target,is_active,priority,created_at,updated_at",
+        order_column="priority",
+        desc=True,
+    )
+
+    columns = [
+        "공지ID", "제목", "내용", "노출대상",
+        "사용중", "우선순위", "등록일시", "수정일시",
+    ]
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(
+        [
+            {
+                "공지ID": row.get("id"),
+                "제목": row.get("title", ""),
+                "내용": row.get("content", ""),
+                "노출대상": row.get("target", "all"),
+                "사용중": bool(row.get("is_active", True)),
+                "우선순위": int(row.get("priority", 0) or 0),
+                "등록일시": row.get("created_at", ""),
+                "수정일시": row.get("updated_at", ""),
+            }
+            for row in rows
+        ],
+        columns=columns,
+    )
+
+
+def render_notice_admin():
+    st.subheader("📢 공지사항 관리")
+    st.caption(
+        "공지 문구를 수정해도 GitHub 코드를 다시 수정할 필요가 없습니다. "
+        "저장 즉시 다음 화면 갱신부터 반영됩니다."
+    )
+
+    create_tab, edit_tab = st.tabs(["➕ 새 공지", "✏️ 기존 공지 관리"])
+
+    with create_tab:
+        title = st.text_input(
+            "공지 제목",
+            value="📢 계정 이용 안내",
+            key="notice_create_title",
+        )
+        content = st.text_area(
+            "공지 내용",
+            height=150,
+            placeholder="여러 줄 입력이 가능합니다.",
+            key="notice_create_content",
+        )
+        target = st.selectbox(
+            "노출 대상",
+            ["all", "student", "teacher"],
+            format_func=lambda v: {
+                "all": "전체",
+                "student": "학생",
+                "teacher": "선생님",
+            }[v],
+            key="notice_create_target",
+        )
+        priority = st.number_input(
+            "우선순위",
+            min_value=0,
+            max_value=999,
+            value=100,
+            step=1,
+            key="notice_create_priority",
+        )
+        active = st.checkbox(
+            "바로 노출",
+            value=True,
+            key="notice_create_active",
+        )
+
+        if st.button(
+            "공지 등록",
+            type="primary",
+            key="notice_create_button",
+            use_container_width=True,
+        ):
+            if not title.strip() or not content.strip():
+                st.warning("공지 제목과 내용을 입력해주세요.")
+            else:
+                supabase.table("notices").insert(
+                    {
+                        "title": title.strip(),
+                        "content": content.strip(),
+                        "target": target,
+                        "is_active": bool(active),
+                        "priority": int(priority),
+                        "created_at": now_kst_iso(),
+                        "updated_at": now_kst_iso(),
+                    }
+                ).execute()
+                st.success("공지를 등록했습니다.")
+                st.rerun()
+
+    with edit_tab:
+        notice_df = get_all_notices_df()
+
+        if notice_df.empty:
+            st.info("등록된 공지가 없습니다.")
+        else:
+            option_map = {
+                int(row["공지ID"]): f"{row['제목']} · {'사용중' if row['사용중'] else '숨김'}"
+                for _, row in notice_df.iterrows()
+            }
+            notice_id = st.selectbox(
+                "수정할 공지",
+                list(option_map.keys()),
+                format_func=lambda value: option_map[value],
+                key="notice_edit_id",
+            )
+
+            row = notice_df[notice_df["공지ID"] == notice_id].iloc[0]
+
+            edit_title = st.text_input(
+                "제목",
+                value=str(row["제목"]),
+                key=f"notice_edit_title_{notice_id}",
+            )
+            edit_content = st.text_area(
+                "내용",
+                value=str(row["내용"]),
+                height=170,
+                key=f"notice_edit_content_{notice_id}",
+            )
+            targets = ["all", "student", "teacher"]
+            current_target = str(row["노출대상"] or "all")
+            edit_target = st.selectbox(
+                "노출 대상",
+                targets,
+                index=targets.index(current_target) if current_target in targets else 0,
+                format_func=lambda v: {
+                    "all": "전체",
+                    "student": "학생",
+                    "teacher": "선생님",
+                }[v],
+                key=f"notice_edit_target_{notice_id}",
+            )
+            edit_priority = st.number_input(
+                "우선순위",
+                min_value=0,
+                max_value=999,
+                value=int(row["우선순위"] or 0),
+                step=1,
+                key=f"notice_edit_priority_{notice_id}",
+            )
+            edit_active = st.checkbox(
+                "사용 중",
+                value=bool(row["사용중"]),
+                key=f"notice_edit_active_{notice_id}",
+            )
+
+            col_save, col_delete = st.columns(2)
+
+            with col_save:
+                if st.button(
+                    "공지 수정 저장",
+                    type="primary",
+                    key=f"notice_save_{notice_id}",
+                    use_container_width=True,
+                ):
+                    if not edit_title.strip() or not edit_content.strip():
+                        st.warning("제목과 내용을 입력해주세요.")
+                    else:
+                        supabase.table("notices").update(
+                            {
+                                "title": edit_title.strip(),
+                                "content": edit_content.strip(),
+                                "target": edit_target,
+                                "is_active": bool(edit_active),
+                                "priority": int(edit_priority),
+                                "updated_at": now_kst_iso(),
+                            }
+                        ).eq("id", int(notice_id)).execute()
+                        st.success("공지를 수정했습니다.")
+                        st.rerun()
+
+            with col_delete:
+                delete_confirm = st.checkbox(
+                    "삭제 확인",
+                    key=f"notice_delete_confirm_{notice_id}",
+                )
+                if st.button(
+                    "공지 삭제",
+                    key=f"notice_delete_{notice_id}",
+                    use_container_width=True,
+                ):
+                    if not delete_confirm:
+                        st.warning("삭제 확인에 체크해주세요.")
+                    else:
+                        supabase.table("notices").delete().eq(
+                            "id", int(notice_id)
+                        ).execute()
+                        st.rerun()
+
 
 
 def show_global_footer():
@@ -574,6 +816,9 @@ def verify_supabase_connection():
         ("book_master", "id"),
         ("school_exam_master", "id"),
         ("school_exam_wrong_answers", "id"),
+        ("password_reset_requests", "id"),
+        ("notices", "id"),
+        ("school_exam_grade_imports", "id"),
     ]
 
     for table_name, column_name in checks:
@@ -1021,6 +1266,332 @@ def build_claude_export_df(
     return pd.DataFrame(records)
 
 
+
+# ---------------------- 비밀번호 재설정 요청 ----------------------
+def create_password_reset_request(username: str) -> dict:
+    username = str(username or "").strip()
+
+    if not username:
+        return {"ok": False, "message": "학생 이름을 입력해주세요."}
+
+    user_response = (
+        supabase.table("users")
+        .select("username")
+        .eq("username", username)
+        .limit(1)
+        .execute()
+    )
+
+    # 계정 존재 여부를 과하게 노출하지 않고 동일한 안내를 유지합니다.
+    if not user_response.data:
+        return {
+            "ok": True,
+            "message": (
+                "비밀번호 재설정 요청을 확인했습니다. "
+                "계정 정보가 확인되면 담당 선생님 또는 관리자가 처리합니다."
+            ),
+        }
+
+    pending = (
+        supabase.table("password_reset_requests")
+        .select("id")
+        .eq("username", username)
+        .eq("status", "pending")
+        .limit(1)
+        .execute()
+    )
+
+    if pending.data:
+        return {
+            "ok": True,
+            "message": "이미 처리 대기 중인 비밀번호 재설정 요청이 있습니다.",
+        }
+
+    supabase.table("password_reset_requests").insert(
+        {
+            "username": username,
+            "status": "pending",
+            "requested_at": now_kst_iso(),
+            "processed_at": None,
+            "processed_by": "",
+        }
+    ).execute()
+
+    return {
+        "ok": True,
+        "message": (
+            "비밀번호 재설정 요청이 접수되었습니다. "
+            "담당 선생님 또는 관리자에게 임시 비밀번호를 확인해주세요."
+        ),
+    }
+
+
+def get_password_reset_requests_df(
+    teacher_name: str | None = None,
+    pending_only: bool = False,
+) -> pd.DataFrame:
+    filters = [("status", "eq", "pending")] if pending_only else []
+
+    rows = fetch_all_rows(
+        "password_reset_requests",
+        "id,username,status,requested_at,processed_at,processed_by",
+        filters=filters,
+        order_column="id",
+        desc=True,
+    )
+
+    columns = [
+        "요청ID", "학생", "상태", "요청일시", "처리일시", "처리자",
+        "학교명", "학년", "반명", "담당선생님",
+    ]
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    roster = get_roster_df()
+    roster_map: dict[str, dict] = {}
+
+    if not roster.empty:
+        for student_name, group in roster.groupby("학생명", sort=False):
+            roster_map[str(student_name)] = {
+                "학교명": ", ".join(
+                    dict.fromkeys(
+                        str(v).strip()
+                        for v in group["학교명"]
+                        if str(v).strip()
+                    )
+                ),
+                "학년": ", ".join(
+                    dict.fromkeys(
+                        str(v).strip()
+                        for v in group["학년"]
+                        if str(v).strip()
+                    )
+                ),
+                "반명": ", ".join(
+                    dict.fromkeys(
+                        str(v).strip()
+                        for v in group["반명"]
+                        if str(v).strip()
+                    )
+                ),
+                "담당선생님": ", ".join(
+                    dict.fromkeys(
+                        normalize_teacher_name(v)
+                        for v in group["담당선생님"]
+                        if str(v).strip()
+                    )
+                ),
+            }
+
+    records = []
+
+    for row in rows:
+        username = str(row.get("username", "")).strip()
+        info = roster_map.get(
+            username,
+            {"학교명": "", "학년": "", "반명": "", "담당선생님": ""},
+        )
+
+        records.append(
+            {
+                "요청ID": row.get("id"),
+                "학생": username,
+                "상태": row.get("status", ""),
+                "요청일시": row.get("requested_at", ""),
+                "처리일시": row.get("processed_at", ""),
+                "처리자": row.get("processed_by", ""),
+                **info,
+            }
+        )
+
+    df = pd.DataFrame(records, columns=columns)
+
+    if teacher_name and teacher_name != ALL_TEACHER_ADMIN:
+        normalized_teacher = normalize_teacher_name(teacher_name)
+        df = df[
+            df["담당선생님"]
+            .fillna("")
+            .astype(str)
+            .str.split(",")
+            .apply(
+                lambda values: normalized_teacher
+                in [normalize_teacher_name(v.strip()) for v in values]
+            )
+        ].copy()
+
+    return df.reset_index(drop=True)
+
+
+def complete_password_reset_request(username: str, processed_by: str):
+    pending_rows = fetch_all_rows(
+        "password_reset_requests",
+        "id",
+        filters=[
+            ("username", "eq", str(username).strip()),
+            ("status", "eq", "pending"),
+        ],
+    )
+
+    for row in pending_rows:
+        (
+            supabase.table("password_reset_requests")
+            .update(
+                {
+                    "status": "completed",
+                    "processed_at": now_kst_iso(),
+                    "processed_by": str(processed_by or "").strip(),
+                }
+            )
+            .eq("id", int(row["id"]))
+            .execute()
+        )
+
+
+def is_temp_password_pending_change(username: str) -> bool:
+    response = (
+        supabase.table("users")
+        .select("temp_password")
+        .eq("username", str(username).strip())
+        .limit(1)
+        .execute()
+    )
+
+    if not response.data:
+        return False
+
+    return bool(str(response.data[0].get("temp_password") or "").strip())
+
+
+def render_forced_password_change(username: str):
+    st.error(
+        "🔐 임시 비밀번호로 로그인했습니다. "
+        "새 비밀번호를 설정해야 오답노트를 이용할 수 있습니다."
+    )
+    st.caption(
+        "새 비밀번호로 변경하기 전에는 오답 작성 및 다른 학생 기능을 사용할 수 없습니다."
+    )
+
+    new_password = st.text_input(
+        "새 비밀번호",
+        type="password",
+        key="forced_new_password",
+    )
+    new_password_confirm = st.text_input(
+        "새 비밀번호 확인",
+        type="password",
+        key="forced_new_password_confirm",
+    )
+
+    if st.button(
+        "새 비밀번호 설정",
+        type="primary",
+        key="forced_password_change_button",
+        use_container_width=True,
+    ):
+        if len(new_password.strip()) < 4:
+            st.warning("새 비밀번호는 4자 이상 입력해주세요.")
+        elif new_password != new_password_confirm:
+            st.warning("새 비밀번호가 서로 일치하지 않습니다.")
+        else:
+            supabase.table("users").update(
+                {
+                    "password_hash": hash_pw(new_password.strip()),
+                    "temp_password": "",
+                }
+            ).eq("username", username).execute()
+
+            st.success("새 비밀번호 설정이 완료되었습니다.")
+            st.rerun()
+
+
+def render_password_reset_request_manager(
+    current_teacher: str,
+    key_prefix: str,
+):
+    requests_df = get_password_reset_requests_df(
+        current_teacher,
+        pending_only=True,
+    )
+
+    if requests_df.empty:
+        st.success("현재 처리 대기 중인 비밀번호 재설정 요청이 없습니다.")
+        return
+
+    st.warning(
+        f"현재 처리 대기 요청이 **{len(requests_df)}건** 있습니다."
+    )
+
+    st.dataframe(
+        requests_df[
+            [
+                "학생", "학교명", "학년", "반명",
+                "담당선생님", "요청일시", "상태",
+            ]
+        ],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    student_options = (
+        requests_df["학생"]
+        .dropna()
+        .astype(str)
+        .drop_duplicates()
+        .tolist()
+    )
+
+    selected_student = st.selectbox(
+        "처리할 학생",
+        student_options,
+        key=f"{key_prefix}_request_student",
+    )
+
+    new_temp_password = st.text_input(
+        "발급할 임시 비밀번호",
+        type="password",
+        placeholder="4자 이상 입력",
+        key=f"{key_prefix}_request_temp_password",
+    )
+    confirm_temp_password = st.text_input(
+        "임시 비밀번호 확인",
+        type="password",
+        key=f"{key_prefix}_request_temp_password_confirm",
+    )
+
+    confirm = st.checkbox(
+        f"{selected_student} 학생에게 임시 비밀번호를 발급합니다.",
+        key=f"{key_prefix}_request_confirm",
+    )
+
+    if st.button(
+        "임시 비밀번호 발급 및 요청 완료",
+        type="primary",
+        key=f"{key_prefix}_request_process_button",
+        use_container_width=True,
+    ):
+        if len(new_temp_password.strip()) < 4:
+            st.warning("임시 비밀번호는 4자 이상 입력해주세요.")
+        elif new_temp_password != confirm_temp_password:
+            st.warning("임시 비밀번호가 서로 일치하지 않습니다.")
+        elif not confirm:
+            st.warning("처리 확인에 체크해주세요.")
+        else:
+            reset_user_password(
+                selected_student,
+                new_temp_password.strip(),
+            )
+            complete_password_reset_request(
+                selected_student,
+                current_teacher,
+            )
+            st.success(
+                f"{selected_student} 학생의 임시 비밀번호를 발급했습니다. "
+                "학생은 로그인 후 새 비밀번호를 반드시 설정해야 합니다."
+            )
+            st.rerun()
+
+
 # ---------------------- 비밀번호 처리 ----------------------
 def hash_pw(pw: str) -> str:
     return hashlib.sha256(pw.encode("utf-8")).hexdigest()
@@ -1090,7 +1661,7 @@ def find_signup_name_conflict(username: str) -> dict | None:
         if len(candidate) < 2:
             continue
 
-        if clean_name.startswith(candidate) or candidate.startswith(clean_name):
+        if candidate in clean_name or clean_name in candidate:
             return {
                 "type": "similar_name",
                 "matched_name": candidate,
@@ -3689,6 +4260,8 @@ def add_school_exam_wrong_answer(
     exam_id: int,
     problem_number: str,
     memo: str,
+    source_type: str = "manual",
+    source_filename: str = "",
 ) -> dict:
     submitted_numbers = parse_problem_numbers(problem_number)
 
@@ -3732,6 +4305,8 @@ def add_school_exam_wrong_answer(
                 "exam_id": int(exam_id),
                 "problem": format_problem_numbers(new_numbers),
                 "memo": str(memo or "").strip(),
+                "source_type": str(source_type or "manual").strip(),
+                "source_filename": str(source_filename or "").strip(),
                 "created_at": now_kst_iso(),
             }
         )
@@ -3749,7 +4324,7 @@ def add_school_exam_wrong_answer(
 def get_school_exam_wrong_answers_df() -> pd.DataFrame:
     answer_rows = fetch_all_rows(
         "school_exam_wrong_answers",
-        "id,username,exam_id,problem,memo,created_at",
+        "id,username,exam_id,problem,memo,source_type,source_filename,created_at",
         order_column="id",
         desc=True,
     )
@@ -3757,7 +4332,8 @@ def get_school_exam_wrong_answers_df() -> pd.DataFrame:
 
     columns = [
         "기록ID", "학생", "기출ID", "연도", "학교", "과목",
-        "시험구분", "기출명", "문제번호", "비고", "작성일시",
+        "시험구분", "기출명", "문제번호", "비고",
+        "입력방식", "원본파일", "작성일시",
     ]
 
     if not answer_rows:
@@ -3786,6 +4362,12 @@ def get_school_exam_wrong_answers_df() -> pd.DataFrame:
                 "기출명": exam.get("표시명", f"기출 ID {exam_id}"),
                 "문제번호": row.get("problem", ""),
                 "비고": row.get("memo", ""),
+                "입력방식": (
+                    "채점결과 파일"
+                    if str(row.get("source_type", "")).strip() == "grading_file"
+                    else "학생 직접 입력"
+                ),
+                "원본파일": row.get("source_filename", ""),
                 "작성일시": row.get("created_at", ""),
             }
         )
@@ -3998,8 +4580,850 @@ def render_student_school_exam_wrong_answer():
         )
 
 
+
+# ============================================================
+# 학교 기출 채점결과 파일 자동 반영
+# ============================================================
+GRADE_NAME_ALIASES = {
+    "학생", "학생명", "성명", "이름", "학생이름", "학생 이름"
+}
+GRADE_WRONG_SUMMARY_ALIASES = {
+    "오답번호", "오답 번호", "오답문항", "오답 문항",
+    "틀린문항", "틀린 문항", "틀린번호", "틀린 번호"
+}
+GRADE_PATTERN_ALIASES = {
+    "정오표", "정오", "채점결과", "채점 결과", "정오결과", "정오 결과"
+}
+
+
+def _grade_cell_text(value) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def _normalize_grade_name(value: str) -> str:
+    return re.sub(r"[^0-9A-Za-z가-힣]", "", str(value or "")).strip()
+
+
+def _extract_question_header(value) -> int | None:
+    raw = _grade_cell_text(value)
+    if not raw:
+        return None
+
+    if re.fullmatch(r"\d{1,3}(?:\.0)?", raw):
+        number = int(float(raw))
+        return number if 1 <= number <= 300 else None
+
+    match = re.fullmatch(
+        r"(?:문항\s*)?(\d{1,3})\s*(?:번|문항)?",
+        raw,
+        flags=re.I,
+    )
+    if match:
+        number = int(match.group(1))
+        return number if 1 <= number <= 300 else None
+
+    return None
+
+
+def _is_wrong_grade_mark(value) -> bool:
+    raw = _grade_cell_text(value)
+    if not raw:
+        return False
+
+    compact = re.sub(r"\s+", "", raw).upper()
+
+    wrong_values = {
+        "X", "×", "✕", "✗", "FALSE", "F", "N", "NO",
+        "오답", "틀림", "틀린", "0", "미정답", "미응답",
+    }
+    correct_values = {
+        "O", "○", "◯", "⭕", "TRUE", "T", "Y", "YES",
+        "정답", "맞음", "1",
+    }
+
+    if compact in wrong_values:
+        return True
+    if compact in correct_values:
+        return False
+
+    # X 표시가 섞여 있는 경우
+    if any(mark in compact for mark in ["×", "✕", "✗"]):
+        return True
+
+    return False
+
+
+def parse_grading_filename(filename: str) -> dict:
+    stem = Path(str(filename or "")).stem
+    cleaned = re.sub(
+        r"[_\-\s]*채점\s*결과.*$",
+        "",
+        stem,
+        flags=re.I,
+    ).strip()
+
+    year = None
+    year_match = re.search(r"(?<!\d)(20\d{2}|\d{2})\s*년도?", cleaned)
+    if year_match:
+        year = int(year_match.group(1))
+        if year < 100:
+            year += 2000
+
+    school = ""
+    school_match = re.search(
+        r"([가-힣A-Za-z0-9]+?(?:여자고|여고|외고|고))",
+        cleaned,
+    )
+    if school_match:
+        school = school_match.group(1).strip()
+
+    known_subjects = [
+        "공통수학1", "공통수학2", "미적분1", "미적분2",
+        "대수", "기하", "확률과통계", "확통",
+    ]
+    subject = next(
+        (subject for subject in known_subjects if subject in cleaned),
+        "",
+    )
+
+    exam_type = ""
+    if school_match:
+        tail = cleaned[school_match.end():].strip(" _-")
+        if subject:
+            tail = tail.replace(subject, "").strip(" _-")
+        exam_type = tail.strip()
+
+    if not exam_type:
+        round_match = re.search(r"(\d+\s*회)", cleaned)
+        if round_match:
+            exam_type = re.sub(r"\s+", "", round_match.group(1))
+
+    return {
+        "year": year or 2025,
+        "school": school,
+        "subject": subject,
+        "exam_type": exam_type or "1회",
+    }
+
+
+def _detect_grade_header_row(raw_df: pd.DataFrame) -> int | None:
+    best_index = None
+    best_score = -1
+
+    scan_rows = min(len(raw_df), 40)
+
+    for row_index in range(scan_rows):
+        row_values = [
+            _grade_cell_text(value)
+            for value in raw_df.iloc[row_index].tolist()
+        ]
+
+        normalized = {
+            re.sub(r"\s+", "", value)
+            for value in row_values
+            if value
+        }
+
+        has_name = any(
+            re.sub(r"\s+", "", alias) in normalized
+            for alias in GRADE_NAME_ALIASES
+        )
+        has_wrong_summary = any(
+            re.sub(r"\s+", "", alias) in normalized
+            for alias in GRADE_WRONG_SUMMARY_ALIASES
+        )
+        has_pattern = any(
+            re.sub(r"\s+", "", alias) in normalized
+            for alias in GRADE_PATTERN_ALIASES
+        )
+        question_count = sum(
+            1 for value in row_values
+            if _extract_question_header(value) is not None
+        )
+
+        score = (
+            (12 if has_name else 0)
+            + (8 if has_wrong_summary else 0)
+            + (6 if has_pattern else 0)
+            + min(question_count, 12)
+        )
+
+        if has_name and score > best_score:
+            best_score = score
+            best_index = row_index
+
+    return best_index
+
+
+def _make_unique_headers(values: list) -> list[str]:
+    result = []
+    seen = {}
+
+    for index, value in enumerate(values):
+        header = _grade_cell_text(value) or f"열{index + 1}"
+        count = seen.get(header, 0)
+        seen[header] = count + 1
+        if count:
+            header = f"{header}_{count + 1}"
+        result.append(header)
+
+    return result
+
+
+def _resolve_grade_student(
+    raw_name: str,
+    current_teacher: str,
+) -> tuple[str, str]:
+    raw_name = str(raw_name or "").strip()
+
+    if not raw_name:
+        return "", "학생명 없음"
+
+    users_df = get_all_users()
+    roster_df = get_roster_df()
+
+    user_names = (
+        users_df["학생"].dropna().astype(str).str.strip().tolist()
+        if not users_df.empty
+        else []
+    )
+    roster_names = (
+        roster_df["학생명"].dropna().astype(str).str.strip().tolist()
+        if not roster_df.empty
+        else []
+    )
+
+    all_candidates = list(dict.fromkeys(user_names + roster_names))
+    raw_norm = _normalize_grade_name(raw_name)
+
+    exact = [
+        candidate
+        for candidate in all_candidates
+        if _normalize_grade_name(candidate) == raw_norm
+    ]
+
+    if len(exact) == 1:
+        candidate = exact[0]
+    else:
+        contained = [
+            candidate
+            for candidate in all_candidates
+            if len(_normalize_grade_name(candidate)) >= 2
+            and (
+                _normalize_grade_name(candidate) in raw_norm
+                or raw_norm in _normalize_grade_name(candidate)
+            )
+        ]
+        contained = list(dict.fromkeys(contained))
+
+        if len(contained) == 1:
+            candidate = contained[0]
+        elif len(contained) > 1:
+            return "", "학생명 중복·모호"
+        else:
+            return "", "명단에서 찾지 못함"
+
+    if candidate not in user_names:
+        return candidate, "미가입 계정"
+
+    if current_teacher != ALL_TEACHER_ADMIN:
+        allowed_students = set(
+            roster_df.loc[
+                roster_df["담당선생님"].apply(normalize_teacher_name)
+                == normalize_teacher_name(current_teacher),
+                "학생명",
+            ]
+            .dropna()
+            .astype(str)
+            .str.strip()
+            .tolist()
+        )
+
+        if candidate not in allowed_students:
+            return candidate, "담당학생 아님"
+
+    return candidate, "반영 가능"
+
+
+def analyze_grading_result_file(
+    uploaded_file,
+    current_teacher: str,
+) -> tuple[pd.DataFrame, dict]:
+    filename = str(uploaded_file.name)
+    extension = Path(filename).suffix.lower()
+    file_bytes = uploaded_file.getvalue()
+
+    if extension == ".xls":
+        engine = "xlrd"
+    elif extension == ".xlsx":
+        engine = "openpyxl"
+    else:
+        raise ValueError("채점결과 파일은 .xls 또는 .xlsx만 지원합니다.")
+
+    try:
+        sheets = pd.read_excel(
+            io.BytesIO(file_bytes),
+            sheet_name=None,
+            header=None,
+            engine=engine,
+            dtype=object,
+        )
+    except ImportError as error:
+        if extension == ".xls":
+            raise ValueError(
+                "구형 .xls 파일을 읽으려면 requirements.txt에 "
+                "'xlrd==2.0.1'을 추가해야 합니다."
+            ) from error
+        raise
+    except Exception as error:
+        raise ValueError(
+            f"채점결과 파일을 읽지 못했습니다: {error}"
+        ) from error
+
+    records = []
+    detected_question_max = 0
+    parsed_sheet_count = 0
+
+    for sheet_name, raw_df in sheets.items():
+        if raw_df is None or raw_df.empty:
+            continue
+
+        header_row = _detect_grade_header_row(raw_df)
+        if header_row is None:
+            continue
+
+        headers = _make_unique_headers(
+            raw_df.iloc[header_row].tolist()
+        )
+        data_df = raw_df.iloc[header_row + 1:].copy()
+        data_df.columns = headers
+        data_df = data_df.reset_index(drop=True)
+
+        normalized_headers = {
+            column: re.sub(r"\s+", "", str(column))
+            for column in data_df.columns
+        }
+
+        name_columns = [
+            column
+            for column, normalized in normalized_headers.items()
+            if normalized in {
+                re.sub(r"\s+", "", alias)
+                for alias in GRADE_NAME_ALIASES
+            }
+        ]
+
+        if not name_columns:
+            continue
+
+        name_column = name_columns[0]
+
+        wrong_summary_columns = [
+            column
+            for column, normalized in normalized_headers.items()
+            if normalized in {
+                re.sub(r"\s+", "", alias)
+                for alias in GRADE_WRONG_SUMMARY_ALIASES
+            }
+        ]
+
+        pattern_columns = [
+            column
+            for column, normalized in normalized_headers.items()
+            if normalized in {
+                re.sub(r"\s+", "", alias)
+                for alias in GRADE_PATTERN_ALIASES
+            }
+        ]
+
+        question_columns = []
+        for column in data_df.columns:
+            question_number = _extract_question_header(column)
+            if question_number is not None:
+                question_columns.append((column, question_number))
+                detected_question_max = max(
+                    detected_question_max,
+                    question_number,
+                )
+
+        parsed_sheet_count += 1
+
+        for _, row in data_df.iterrows():
+            raw_student = _grade_cell_text(row.get(name_column))
+
+            if not raw_student:
+                continue
+
+            # 합계, 평균 등 학생이 아닌 행 제외
+            if any(
+                token in raw_student
+                for token in ["합계", "평균", "총점", "전체"]
+            ):
+                continue
+
+            wrong_numbers = []
+
+            if wrong_summary_columns:
+                value = row.get(wrong_summary_columns[0])
+                wrong_numbers = parse_problem_numbers(
+                    _grade_cell_text(value)
+                )
+
+            if not wrong_numbers and pattern_columns:
+                pattern = _grade_cell_text(
+                    row.get(pattern_columns[0])
+                )
+                symbols = [
+                    ch
+                    for ch in pattern
+                    if ch not in {" ", ",", "|", "/", "-", "_"}
+                ]
+                wrong_numbers = [
+                    str(index + 1)
+                    for index, symbol in enumerate(symbols)
+                    if _is_wrong_grade_mark(symbol)
+                ]
+                if symbols:
+                    detected_question_max = max(
+                        detected_question_max,
+                        len(symbols),
+                    )
+
+            if not wrong_numbers and question_columns:
+                for column, question_number in question_columns:
+                    if _is_wrong_grade_mark(row.get(column)):
+                        wrong_numbers.append(str(question_number))
+
+            matched_student, status = _resolve_grade_student(
+                raw_student,
+                current_teacher,
+            )
+
+            if not wrong_numbers and status == "반영 가능":
+                status = "오답 없음"
+
+            records.append(
+                {
+                    "시트": str(sheet_name),
+                    "원본학생명": raw_student,
+                    "매칭학생": matched_student,
+                    "오답번호": format_problem_numbers(wrong_numbers),
+                    "오답개수": len(wrong_numbers),
+                    "상태": status,
+                }
+            )
+
+    if not records:
+        raise ValueError(
+            "학생명과 오답 문항을 자동 인식하지 못했습니다. "
+            "파일의 학생명 열과 문항별 O/X 또는 오답번호 열을 확인해주세요."
+        )
+
+    preview_df = pd.DataFrame(records)
+
+    info = {
+        "sheet_count": parsed_sheet_count,
+        "question_count": detected_question_max or None,
+        "file_hash": hashlib.sha256(file_bytes).hexdigest(),
+        "file_name": filename,
+        "file_size": len(file_bytes),
+    }
+
+    return preview_df, info
+
+
+def get_grade_import_by_hash(file_hash: str) -> dict | None:
+    response = (
+        supabase.table("school_exam_grade_imports")
+        .select(
+            "id,file_hash,file_name,exam_id,uploader,"
+            "imported_students,imported_numbers,skipped_students,created_at"
+        )
+        .eq("file_hash", str(file_hash))
+        .limit(1)
+        .execute()
+    )
+
+    if response.data:
+        return response.data[0]
+
+    return None
+
+
+def ensure_school_exam_for_grade_import(
+    exam_year: int,
+    school_name: str,
+    subject: str,
+    exam_type: str,
+    question_count: int | None = None,
+) -> int:
+    exam_year = int(exam_year)
+    school_name = str(school_name or "").strip()
+    subject = str(subject or "").strip()
+    exam_type = str(exam_type or "").strip()
+
+    if not school_name or not subject or not exam_type:
+        raise ValueError("연도·학교·과목·시험구분을 모두 확인해주세요.")
+
+    response = (
+        supabase.table("school_exam_master")
+        .select("id")
+        .eq("exam_year", exam_year)
+        .eq("school_name", school_name)
+        .eq("subject", subject)
+        .eq("exam_type", exam_type)
+        .limit(1)
+        .execute()
+    )
+
+    if response.data:
+        return int(response.data[0]["id"])
+
+    display_name = make_school_exam_display_name(
+        exam_year,
+        school_name,
+        subject,
+        exam_type,
+    )
+
+    insert_response = (
+        supabase.table("school_exam_master")
+        .insert(
+            {
+                "exam_year": exam_year,
+                "school_name": school_name,
+                "subject": subject,
+                "exam_type": exam_type,
+                "question_count": (
+                    int(question_count)
+                    if question_count
+                    else None
+                ),
+                "scope": "",
+                "display_name": display_name,
+                "is_active": True,
+                "created_at": now_kst_iso(),
+            }
+        )
+        .execute()
+    )
+
+    if not insert_response.data:
+        raise RuntimeError("학교 기출 시험 등록에 실패했습니다.")
+
+    return int(insert_response.data[0]["id"])
+
+
+def import_grading_preview_to_school_exam(
+    preview_df: pd.DataFrame,
+    file_info: dict,
+    exam_year: int,
+    school_name: str,
+    subject: str,
+    exam_type: str,
+    current_teacher: str,
+    question_count: int | None = None,
+) -> dict:
+    duplicate = get_grade_import_by_hash(
+        file_info["file_hash"]
+    )
+
+    if duplicate:
+        raise ValueError(
+            "이 채점결과 파일은 이미 반영된 파일입니다. "
+            f"기존 업로드: {duplicate.get('created_at', '')}"
+        )
+
+    exam_id = ensure_school_exam_for_grade_import(
+        exam_year,
+        school_name,
+        subject,
+        exam_type,
+        question_count,
+    )
+
+    imported_students = 0
+    imported_numbers = 0
+    skipped_students = 0
+
+    valid_df = preview_df[
+        preview_df["상태"].isin(["반영 가능", "오답 없음"])
+    ].copy()
+
+    for _, row in valid_df.iterrows():
+        username = str(row["매칭학생"]).strip()
+        problem_number = str(row["오답번호"] or "").strip()
+
+        if not username:
+            skipped_students += 1
+            continue
+
+        if not problem_number:
+            # 오답이 없는 학생은 기록을 만들지 않습니다.
+            continue
+
+        result = add_school_exam_wrong_answer(
+            username=username,
+            exam_id=exam_id,
+            problem_number=problem_number,
+            memo="채점결과 파일 자동 반영",
+            source_type="grading_file",
+            source_filename=file_info["file_name"],
+        )
+
+        if result["saved"]:
+            imported_students += 1
+            imported_numbers += len(result["new_numbers"])
+        else:
+            skipped_students += 1
+
+    skipped_students += int(
+        (~preview_df["상태"].isin(["반영 가능", "오답 없음"])).sum()
+    )
+
+    (
+        supabase.table("school_exam_grade_imports")
+        .insert(
+            {
+                "file_hash": file_info["file_hash"],
+                "file_name": file_info["file_name"],
+                "exam_id": int(exam_id),
+                "uploader": str(current_teacher or "").strip(),
+                "imported_students": int(imported_students),
+                "imported_numbers": int(imported_numbers),
+                "skipped_students": int(skipped_students),
+                "created_at": now_kst_iso(),
+            }
+        )
+        .execute()
+    )
+
+    return {
+        "exam_id": exam_id,
+        "imported_students": imported_students,
+        "imported_numbers": imported_numbers,
+        "skipped_students": skipped_students,
+    }
+
+
+def render_school_exam_grade_upload():
+    current_teacher = st.session_state.teacher_name
+
+    with st.expander(
+        "📥 채점결과(.xls/.xlsx) 자동 반영",
+        expanded=False,
+    ):
+        st.info(
+            "채점 프로그램에서 내려받은 결과 파일을 올리면 "
+            "학생명과 틀린 문항을 자동 분석합니다. "
+            "반영 전에 반드시 미리보기를 확인해주세요."
+        )
+
+        st.warning(
+            "⚠️ 같은 채점결과 파일은 한 번만 반영됩니다. "
+            "파일명·학교·과목·시험구분이 맞는지 확인 후 저장하세요."
+        )
+
+        uploaded_file = st.file_uploader(
+            "채점결과 파일",
+            type=["xls", "xlsx"],
+            key="school_grade_result_upload",
+        )
+
+        if uploaded_file is None:
+            return
+
+        metadata = parse_grading_filename(
+            uploaded_file.name
+        )
+
+        col1, col2 = st.columns(2)
+
+        with col1:
+            exam_year = st.number_input(
+                "연도",
+                min_value=2000,
+                max_value=2100,
+                value=int(metadata["year"]),
+                step=1,
+                key="grade_upload_year",
+            )
+            school_name = st.text_input(
+                "학교",
+                value=metadata["school"],
+                key="grade_upload_school",
+            )
+
+        with col2:
+            subject = st.text_input(
+                "과목",
+                value=metadata["subject"] or "미적분1",
+                key="grade_upload_subject",
+            )
+            exam_type = st.text_input(
+                "시험구분",
+                value=metadata["exam_type"],
+                key="grade_upload_exam_type",
+            )
+
+        if st.button(
+            "채점결과 분석",
+            key="grade_upload_analyze",
+            use_container_width=True,
+        ):
+            try:
+                preview_df, file_info = analyze_grading_result_file(
+                    uploaded_file,
+                    current_teacher,
+                )
+                st.session_state["grade_upload_preview"] = preview_df
+                st.session_state["grade_upload_file_info"] = file_info
+                st.session_state["grade_upload_filename"] = uploaded_file.name
+            except Exception as error:
+                st.session_state.pop("grade_upload_preview", None)
+                st.session_state.pop("grade_upload_file_info", None)
+                st.error(str(error))
+
+        preview_df = st.session_state.get(
+            "grade_upload_preview",
+            pd.DataFrame(),
+        )
+        file_info = st.session_state.get(
+            "grade_upload_file_info",
+            {},
+        )
+
+        # 다른 파일로 바뀌었으면 이전 미리보기 제거
+        if (
+            not preview_df.empty
+            and st.session_state.get("grade_upload_filename")
+            != uploaded_file.name
+        ):
+            st.session_state.pop("grade_upload_preview", None)
+            st.session_state.pop("grade_upload_file_info", None)
+            preview_df = pd.DataFrame()
+            file_info = {}
+
+        if preview_df.empty:
+            return
+
+        duplicate = get_grade_import_by_hash(
+            file_info["file_hash"]
+        )
+
+        if duplicate:
+            st.error(
+                "🚫 이 파일은 이미 학교 기출 오답 현황에 반영되었습니다. "
+                f"업로드 일시: {duplicate.get('created_at', '')}"
+            )
+
+        total_students = len(preview_df)
+        available_count = int(
+            preview_df["상태"].isin(["반영 가능", "오답 없음"]).sum()
+        )
+        wrong_total = int(
+            preview_df.loc[
+                preview_df["상태"].isin(["반영 가능", "오답 없음"]),
+                "오답개수",
+            ].sum()
+        )
+
+        m1, m2, m3 = st.columns(3)
+        m1.metric("인식 학생", total_students)
+        m2.metric("반영 가능", available_count)
+        m3.metric("오답 문항", wrong_total)
+
+        st.dataframe(
+            preview_df,
+            use_container_width=True,
+            hide_index=True,
+            height=420,
+        )
+
+        question_count = st.number_input(
+            "시험 총 문항 수",
+            min_value=0,
+            max_value=300,
+            value=int(file_info.get("question_count") or 0),
+            step=1,
+            key="grade_upload_question_count",
+            help="자동 인식이 0이면 직접 입력해도 됩니다.",
+        )
+
+        st.info(
+            f"반영될 시험: **{int(exam_year)} {subject} "
+            f"{school_name} {exam_type}**"
+        )
+
+        confirm = st.checkbox(
+            "학교·과목·시험구분과 학생별 오답번호를 확인했습니다.",
+            key="grade_upload_confirm",
+        )
+
+        if st.button(
+            "학교 기출 오답 현황에 반영",
+            type="primary",
+            key="grade_upload_apply",
+            use_container_width=True,
+            disabled=bool(duplicate),
+        ):
+            if not school_name.strip():
+                st.warning("학교명을 확인해주세요.")
+            elif not subject.strip():
+                st.warning("과목을 확인해주세요.")
+            elif not exam_type.strip():
+                st.warning("시험구분을 확인해주세요.")
+            elif not confirm:
+                st.warning("확인 항목에 체크해주세요.")
+            else:
+                try:
+                    result = import_grading_preview_to_school_exam(
+                        preview_df=preview_df,
+                        file_info=file_info,
+                        exam_year=int(exam_year),
+                        school_name=school_name.strip(),
+                        subject=subject.strip(),
+                        exam_type=exam_type.strip(),
+                        current_teacher=current_teacher,
+                        question_count=(
+                            int(question_count)
+                            if question_count > 0
+                            else None
+                        ),
+                    )
+
+                    st.success(
+                        "채점결과 반영 완료 · "
+                        f"학생 {result['imported_students']}명 / "
+                        f"오답 {result['imported_numbers']}문항 반영"
+                    )
+
+                    if result["skipped_students"]:
+                        st.warning(
+                            f"{result['skipped_students']}명은 "
+                            "미가입·담당 외 학생·중복 기록 등의 이유로 제외되었습니다."
+                        )
+
+                    st.session_state.pop("grade_upload_preview", None)
+                    st.session_state.pop("grade_upload_file_info", None)
+                    st.session_state.pop("grade_upload_filename", None)
+                    st.rerun()
+                except Exception as error:
+                    st.error(str(error))
+
 def render_teacher_school_exam_management():
-    st.subheader("🏫 학교 기출 오답 현황·Paper")
+    st.subheader("🏫 학교 기출 오답 현황")
+
+    render_school_exam_grade_upload()
+
+    st.divider()
 
     current_teacher = st.session_state.teacher_name
     answer_df = get_school_exam_wrong_answers_df()
@@ -4097,7 +5521,7 @@ def render_teacher_school_exam_management():
         display_df[
             [
                 "학생", "연도", "학교", "과목", "시험구분",
-                "기출명", "문제번호", "비고", "작성일시",
+                "기출명", "문제번호", "비고", "입력방식", "원본파일", "작성일시",
             ]
         ],
         use_container_width=True,
@@ -5446,11 +6870,13 @@ def show_role_select():
 def show_student():
     if st.session_state.student_user is None:
         show_banner()
-        show_account_notice()
+        show_account_notice("student")
 
         st.title("👩‍🎓 학생 로그인")
 
-        tab_login, tab_signup = st.tabs(["로그인", "회원가입"])
+        tab_login, tab_signup, tab_reset_request = st.tabs(
+            ["로그인", "회원가입", "🔑 비밀번호 재설정 요청"]
+        )
 
         with tab_login:
             username = st.text_input("학생", key="login_id")
@@ -5532,6 +6958,36 @@ def show_student():
                             "하단 오픈채팅으로 문의해주세요."
                         )
 
+        with tab_reset_request:
+            st.info(
+                "비밀번호를 잊어버린 학생은 본인 이름으로 재설정 요청을 보내주세요. "
+                "담당 선생님 또는 관리자가 확인한 뒤 임시 비밀번호를 발급합니다."
+            )
+
+            reset_request_name = st.text_input(
+                "학생 이름",
+                key="student_password_reset_request_name",
+                placeholder="명단에 등록된 본인 이름",
+            )
+
+            if st.button(
+                "비밀번호 재설정 요청",
+                key="student_password_reset_request_button",
+                use_container_width=True,
+            ):
+                result = create_password_reset_request(
+                    reset_request_name
+                )
+
+                if result["ok"]:
+                    st.success(result["message"])
+                    st.info(
+                        "임시 비밀번호를 안내받은 뒤 로그인하면 "
+                        "새 비밀번호 설정 화면이 자동으로 표시됩니다."
+                    )
+                else:
+                    st.warning(result["message"])
+
         st.divider()
 
         if st.button("← 처음으로"):
@@ -5543,6 +6999,26 @@ def show_student():
 
         st.title("📝 내 오답노트")
         st.write(f"환영합니다, **{st.session_state.student_user}**님!")
+
+        if is_temp_password_pending_change(
+            st.session_state.student_user
+        ):
+            st.divider()
+            render_forced_password_change(
+                st.session_state.student_user
+            )
+
+            st.divider()
+
+            if st.button(
+                "로그아웃",
+                key="forced_password_logout",
+            ):
+                st.session_state.student_user = None
+                st.session_state.role = None
+                st.rerun()
+
+            return
 
         st.divider()
 
@@ -5705,7 +7181,7 @@ def show_student():
 def show_admin():
     if not st.session_state.is_admin:
         show_banner()
-        show_account_notice()
+        show_account_notice("teacher")
 
         st.title("👨‍🏫 선생님 로그인")
 
@@ -5756,21 +7232,21 @@ def show_admin():
     (
         tab_answers,
         tab_weekly_submission,
+        tab_school_exam,
         tab_weekly_missing,
         tab_signup_status,
         tab_teacher_students,
         tab_paper,
-        tab_school_exam,
         tab_print,
     ) = st.tabs(
         [
             "📋 전체 오답 현황",
             "📅 주간 제출 현황",
+            "🏫 학교 기출 오답 현황",
             "🚨 미제출 학생 보기",
             "👤 가입 현황",
             "🏫 내 반 학생",
             "🧾 오답노트 만들기",
-            "🏫 학교 기출 오답",
             "🖨️ 출력 관리",
         ]
     )
@@ -5895,6 +7371,9 @@ def show_admin():
 
     with tab_weekly_submission:
         render_weekly_submission_status()
+
+    with tab_school_exam:
+        render_teacher_school_exam_management()
 
     with tab_weekly_missing:
         render_weekly_missing_students()
@@ -6206,9 +7685,6 @@ def show_admin():
                     "오답노트를 만들 학생을 한 명 이상 선택해주세요."
                 )
 
-    with tab_school_exam:
-        render_teacher_school_exam_management()
-
     with tab_print:
         render_print_management()
 
@@ -6216,6 +7692,16 @@ def show_admin():
 
     with st.expander("🔑 담당 학생 비밀번호 초기화", expanded=False):
         current_teacher = st.session_state.teacher_name
+
+        st.markdown("#### 📥 학생 재설정 요청")
+        render_password_reset_request_manager(
+            current_teacher,
+            "teacher_reset_request",
+        )
+
+        st.divider()
+        st.markdown("#### 🔧 직접 비밀번호 초기화")
+
         roster_df = get_roster_df()
         users_df = get_all_users()
 
@@ -6308,6 +7794,10 @@ def show_admin():
                                 selected_reset_student,
                                 new_reset_password.strip(),
                             )
+                            complete_password_reset_request(
+                                selected_reset_student,
+                                current_teacher,
+                            )
                             st.success(
                                 f"{selected_reset_student} 학생의 비밀번호를 "
                                 "새 임시 비밀번호로 초기화했습니다."
@@ -6362,6 +7852,25 @@ def show_superadmin():
 
         st.title("🔐 관리자 전용")
         st.caption("학생 계정 복구, 비밀번호 확인·초기화 및 회원 관리를 진행할 수 있습니다.")
+
+        pending_reset_df = get_password_reset_requests_df(
+            ALL_TEACHER_ADMIN,
+            pending_only=True,
+        )
+
+        if not pending_reset_df.empty:
+            st.error(
+                f"🔑 비밀번호 재설정 대기 요청이 {len(pending_reset_df)}건 있습니다."
+            )
+
+        with st.expander(
+            "🔑 비밀번호 재설정 요청 · 실시간 처리",
+            expanded=True,
+        ):
+            render_password_reset_request_manager(
+                ALL_TEACHER_ADMIN,
+                "superadmin_reset_request",
+            )
 
         st.divider()
 
@@ -6424,6 +7933,11 @@ def show_superadmin():
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     key="download_current_roster",
                 )
+
+        st.divider()
+
+        with st.expander("📢 공지사항 관리", expanded=False):
+            render_notice_admin()
 
         st.divider()
 
@@ -6591,6 +8105,10 @@ def show_superadmin():
                                 reset_user_password(
                                     selected_reset_user,
                                     new_temp_password.strip(),
+                                )
+                                complete_password_reset_request(
+                                    selected_reset_user,
+                                    ALL_TEACHER_ADMIN,
                                 )
                                 st.success(
                                     f"{selected_reset_user} 학생의 비밀번호를 "
