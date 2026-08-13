@@ -2,3 +2,4 @@ streamlit
 pandas
 openpyxl
 supabase
+xlrd==2.0.1
