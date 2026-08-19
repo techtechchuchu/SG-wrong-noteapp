@@ -1,4 +1,4 @@
-import io
+              mport io
 import base64
 import re
 import hashlib
@@ -36,6 +36,97 @@ BOOKS = [
 
 TEACHERS = ["이주백.T", "박병민.T", "노대근.T"]
 ALL_TEACHER_ADMIN = "전체 관리자"
+
+# X-패턴 계열은 울산 각 고교 기출을 이어붙인 구성이라, 문제 PDF 안의 원래 번호(1~N)가
+# 학교마다 겹친다. 인덱스 빌드 단계에서 학교별로 500,600,700...번대로 내부 번호를 다시
+# 매겼기 때문에(build_auto.py의 UNITS 주석 참고), 학생이 시험지에 적힌 원래 번호를 그대로
+# 입력하면 학교 정보 없이는 어느 내부 번호인지 알 수 없다.
+# 아래 표는 X-패턴 원본 PDF의 각 문제 [출처] 인용줄(예: "[출처] 내신 24년 울산 강남고 고1
+# 1학기기말 4 [3.80점]")을 직접 읽어 자동 추출한 것으로, 학교별 오프셋(내부번호 = offset +
+# 원래번호)과 그 학교가 낸 문항 수(max)를 담고 있다. 한 학교가 같은 책에 시험을 2번 이상
+# 냈으면 리스트에 블록이 여러 개 들어간다(exam_type으로 구분).
+# 아래 4개 구간은 같은 100번대 안에 서로 다른 학교 문제가 섞여 있어(예: 1301~1320이
+# 매곡고+가온고 절반씩) 경계를 안전하게 확정하지 못했다 - 그 학교들은 이 표에 없다:
+#   X-패턴 공통수학2: 1301~1320(매곡고/가온고), 1401~1420(중앙고/천상고),
+#                    2301~2320(현대고/범서고), 3301~3368(천상고/학성고/학성여고)
+#   X-패턴 미적분1: 3701~3742(대송고/남창고)
+XPATTERN_SCHOOL_MAP = {
+    "X-패턴 공통수학2": {
+        "강남고": [{"offset": 500, "max": 25, "exam_type": "1학기기말"}],
+        "다운고": [{"offset": 600, "max": 16, "exam_type": "1학기기말"}],
+        "달천고": [{"offset": 700, "max": 31, "exam_type": "2학기중간"}, {"offset": 2800, "max": 38, "exam_type": ""}],
+        "동천고": [{"offset": 800, "max": 38, "exam_type": "2학기중간"}],
+        "무거고": [{"offset": 900, "max": 34, "exam_type": "1학기기말"}],
+        "무룡고": [{"offset": 1000, "max": 20, "exam_type": "2학기중간"}],
+        "성신고": [{"offset": 1100, "max": 30, "exam_type": "2학기중간"}],
+        "신정고": [{"offset": 1200, "max": 35, "exam_type": "1학기기말"}],
+        "울산여고": [{"offset": 1500, "max": 20, "exam_type": "1학기기말"}, {"offset": 3100, "max": 27, "exam_type": ""}],
+        "제일고": [{"offset": 1600, "max": 20, "exam_type": "2학기중간"}],
+        "우신고": [{"offset": 1700, "max": 20, "exam_type": "1학기기말"}],
+        "성광여고": [{"offset": 1800, "max": 20, "exam_type": "2학기중간"}, {"offset": 2900, "max": 16, "exam_type": ""}],
+        "신선여고": [{"offset": 1900, "max": 20, "exam_type": "2학기중간"}],
+        "대현고": [{"offset": 2000, "max": 20, "exam_type": "1학기기말"}],
+        "삼산고": [{"offset": 2100, "max": 20, "exam_type": "2학기중간"}],
+        "학성고": [{"offset": 2200, "max": 20, "exam_type": "1학기기말"}],
+        "울산외고": [{"offset": 2400, "max": 20, "exam_type": "1학기기말"}, {"offset": 3200, "max": 7, "exam_type": ""}],
+        "울산고": [{"offset": 2500, "max": 20, "exam_type": "2학기중간"}, {"offset": 3008, "max": 20, "exam_type": ""}],
+        "함월고": [{"offset": 2600, "max": 20, "exam_type": "2학기중간"}],
+        "약사고": [{"offset": 2700, "max": 20, "exam_type": "1학기기말"}],
+    },
+    "X-패턴 미적분1": {
+        "매곡고": [{"offset": 500, "max": 18, "exam_type": "2학기중간 미적분1"}],
+        "성광여고": [{"offset": 600, "max": 22, "exam_type": "2학기중간 미적분1"}, {"offset": 2900, "max": 22, "exam_type": "2학기중간 미적분1"}],
+        "신정고": [{"offset": 700, "max": 23, "exam_type": "1학기중간 미적분1"}, {"offset": 2600, "max": 21, "exam_type": "2학기중간 미적분1"}],
+        "울산고": [{"offset": 800, "max": 15, "exam_type": "1학기중간 미적분1"}],
+        "울산여고": [{"offset": 900, "max": 18, "exam_type": "1학기중간 미적분1"}, {"offset": 2300, "max": 20, "exam_type": "1학기중간 미적분1"}],
+        "울산외고": [{"offset": 1000, "max": 21, "exam_type": "2학기중간 미적분1"}, {"offset": 2200, "max": 20, "exam_type": "2학기중간 미적분1"}],
+        "제일고": [{"offset": 1100, "max": 18, "exam_type": "2학기중간 미적분1"}],
+        "천상고": [{"offset": 1200, "max": 22, "exam_type": "1학기중간 미적분1"}, {"offset": 1900, "max": 19, "exam_type": "2학기중간 미적분1"}],
+        "학성고": [{"offset": 1300, "max": 20, "exam_type": "2학기중간 미적분1"}, {"offset": 2000, "max": 18, "exam_type": "2학기중간 미적분1"}],
+        "함월고": [{"offset": 1400, "max": 20, "exam_type": "2학기중간 미적분1"}, {"offset": 1700, "max": 21, "exam_type": "2학기중간 미적분1"}],
+        "화암고": [{"offset": 1500, "max": 21, "exam_type": "2학기중간 미적분1"}],
+        "현대고": [{"offset": 1600, "max": 22, "exam_type": "2학기중간 미적분1"}],
+        "학성여고": [{"offset": 1816, "max": 4, "exam_type": "2학기중간 미적분1"}],
+        "중앙여고": [{"offset": 2115, "max": 5, "exam_type": "2학기중간 미적분1"}],
+        "약사고": [{"offset": 2400, "max": 21, "exam_type": "2학기중간 미적분1"}],
+        "우신고": [{"offset": 2500, "max": 20, "exam_type": "2학기중간 미적분1"}],
+        "신선여고": [{"offset": 2700, "max": 22, "exam_type": "2학기중간 미적분1"}],
+        "성신고": [{"offset": 2800, "max": 23, "exam_type": "2학기중간 미적분1"}],
+        "삼산고": [{"offset": 3000, "max": 21, "exam_type": "1학기중간 미적분1"}],
+        "범서고": [{"offset": 3100, "max": 22, "exam_type": "2학기중간 미적분1"}],
+        "무룡고": [{"offset": 3200, "max": 19, "exam_type": "2학기중간 미적분1"}],
+        "문수고": [{"offset": 3300, "max": 20, "exam_type": "2학기중간 미적분1"}],
+        "동천고": [{"offset": 3400, "max": 23, "exam_type": "2학기중간 미적분1"}],
+        "무거고": [{"offset": 3500, "max": 24, "exam_type": "2학기중간 미적분1"}],
+        "달천고": [{"offset": 3600, "max": 21, "exam_type": "1학기중간 미적분1"}],
+    },
+    "X-패턴 확통": {
+        "강남고": [{"offset": 500, "max": 19, "exam_type": ""}],
+        "다운고": [{"offset": 600, "max": 22, "exam_type": "1학기중간 확통"}],
+        "달천고": [{"offset": 700, "max": 21, "exam_type": "2학기중간 확통"}],
+        "대송고": [{"offset": 800, "max": 19, "exam_type": "2학기중간 확통"}],
+        "매곡고": [{"offset": 900, "max": 22, "exam_type": "1학기중간 확통"}],
+        "무거고": [{"offset": 1000, "max": 23, "exam_type": "1학기중간 확통"}],
+        "삼산고": [{"offset": 1100, "max": 22, "exam_type": "2학기중간 확통"}, {"offset": 2900, "max": 21, "exam_type": ""}],
+        "성광여고": [{"offset": 1200, "max": 19, "exam_type": "1학기중간 확통"}],
+        "신선여고": [{"offset": 1300, "max": 21, "exam_type": "1학기중간 확통"}],
+        "약사고": [{"offset": 1400, "max": 20, "exam_type": "1학기중간 확통"}],
+        "우신고": [{"offset": 1500, "max": 20, "exam_type": "1학기중간 확통"}, {"offset": 1600, "max": 20, "exam_type": "2학기중간 확통"}],
+        "울산고": [{"offset": 1700, "max": 24, "exam_type": "2학기중간 확통"}],
+        "울산여고": [{"offset": 1800, "max": 24, "exam_type": "2학기중간 확통"}],
+        "울산외고": [{"offset": 1900, "max": 18, "exam_type": "1학기중간 확통"}, {"offset": 3000, "max": 23, "exam_type": "1학기중간 확통"}],
+        "제일고": [{"offset": 2000, "max": 22, "exam_type": "1학기중간 확통"}, {"offset": 3100, "max": 18, "exam_type": "1학기중간 확통"}],
+        "중앙고": [{"offset": 2100, "max": 24, "exam_type": "2학기중간 확통"}],
+        "천상고": [{"offset": 2200, "max": 21, "exam_type": "2학기중간 확통"}],
+        "학성고": [{"offset": 2300, "max": 20, "exam_type": "1학기중간 확통"}, {"offset": 3200, "max": 21, "exam_type": "1학기중간 확통"}, {"offset": 3300, "max": 21, "exam_type": "2학기중간 확통"}],
+        "학성여고": [{"offset": 2400, "max": 19, "exam_type": "1학기중간 확통"}],
+        "현대고": [{"offset": 2500, "max": 22, "exam_type": "1학기중간 확통"}],
+        "호계고": [{"offset": 2600, "max": 20, "exam_type": "1학기중간 확통"}],
+        "화봉고": [{"offset": 2700, "max": 22, "exam_type": ""}],
+        "효정고": [{"offset": 2800, "max": 22, "exam_type": "1학기중간 확통"}],
+        "함월고": [{"offset": 3400, "max": 22, "exam_type": "1학기중간 확통"}],
+    },
+}
 
 ROSTER_REQUIRED_COLUMNS = {
     "반명",
@@ -7254,9 +7345,56 @@ def show_student():
 
         st.info(f"현재 선택한 교재: **{book}**")
 
+        # X-패턴 계열은 여러 학교 기출을 이어붙인 교재라, 학생이 시험지에 적힌
+        # 원래 번호만 봐서는 내부 번호(학교별 500/600/700...번대)를 알 수 없다.
+        # 학교(+시험)를 고르면 원래 번호를 그대로 입력해도 자동 변환해서 저장한다.
+        xpattern_schools = XPATTERN_SCHOOL_MAP.get(book, {})
+        selected_school = None
+        selected_xpattern_block = None
+
+        if xpattern_schools:
+            st.info(
+                "🏫 이 교재는 여러 학교 기출을 이어붙인 X-패턴 교재입니다. "
+                "**학교(시험)를 먼저 선택**한 뒤, 문제 번호는 시험지에 적힌 "
+                "원래 번호를 그대로 입력해주세요. 저장 시 자동으로 변환됩니다."
+            )
+
+            school_options = sorted(xpattern_schools.keys())
+            selected_school = st.selectbox(
+                "학교 선택 (X-패턴 전용)",
+                school_options,
+                key="xpattern_school_select",
+            )
+
+            blocks = xpattern_schools[selected_school]
+            if len(blocks) == 1:
+                selected_xpattern_block = blocks[0]
+            else:
+                block_labels = [
+                    b["exam_type"] or f"{i + 1}번째 시험"
+                    for i, b in enumerate(blocks)
+                ]
+                block_index = st.selectbox(
+                    "시험 선택 (같은 학교가 이 교재에 시험을 여러 번 냈습니다)",
+                    list(range(len(blocks))),
+                    format_func=lambda i: block_labels[i],
+                    key="xpattern_block_select",
+                )
+                selected_xpattern_block = blocks[block_index]
+
+            st.caption(
+                f"'{selected_school}'"
+                + (f" ({selected_xpattern_block['exam_type']})" if selected_xpattern_block['exam_type'] else "")
+                + f" 원래 시험지 번호는 1~{selected_xpattern_block['max']}번까지 있습니다. "
+                "그 번호를 그대로 입력해주세요."
+            )
+
         problem_number = st.text_input(
             "문제 번호",
-            placeholder="예: 032, 128, 45, 54, 65"
+            placeholder=(
+                "예: 3, 7, 12 (시험지에 적힌 원래 번호 그대로)"
+                if xpattern_schools else "예: 032, 128, 45, 54, 65"
+            )
         )
 
         note = st.text_area(
@@ -7264,8 +7402,12 @@ def show_student():
             placeholder="예: 계산 실수, 개념 헷갈림, 다시 질문 필요, 변형문제 필요 등"
         )
 
+        book_confirm_label = f"'{book}' 교재가 맞는지 확인했습니다."
+        if selected_school:
+            book_confirm_label += f" (학교: {selected_school})"
+
         book_confirm = st.checkbox(
-            f"'{book}' 교재가 맞는지 확인했습니다.",
+            book_confirm_label,
             key="student_book_confirm",
         )
 
@@ -7274,38 +7416,75 @@ def show_student():
                 st.warning("문제 번호를 입력해주세요.")
             elif not book_confirm:
                 st.error("선택한 교재가 맞는지 확인한 후 체크해주세요.")
+            elif xpattern_schools and selected_xpattern_block is None:
+                st.error("학교를 선택해주세요.")
             else:
-                result = add_wrong_answer(
-                    st.session_state.student_user,
-                    book,
-                    problem_number.strip(),
-                    note.strip()
-                )
+                note_prefix = ""
+                problem_number_to_save = problem_number.strip()
 
-                if result["saved"]:
-                    saved_text = ", ".join(result["new_numbers"])
-                    st.success(f"새 문제번호 {saved_text}이(가) 저장되었습니다.")
+                if xpattern_schools:
+                    raw_numbers = parse_problem_numbers(problem_number)
+                    max_number = selected_xpattern_block["max"]
+                    invalid_numbers = [
+                        n for n in raw_numbers
+                        if not (1 <= int(n) <= max_number)
+                    ]
 
-                    if result["duplicate_numbers"]:
-                        duplicate_text = ", ".join(result["duplicate_numbers"])
-                        st.info(
-                            f"이미 저장된 문제번호 {duplicate_text}은(는) "
-                            "중복 저장하지 않았습니다."
+                    if invalid_numbers:
+                        st.error(
+                            f"'{selected_school}'"
+                            + (f"({selected_xpattern_block['exam_type']})" if selected_xpattern_block['exam_type'] else "")
+                            + f"의 원래 번호는 1~{max_number}까지만 있습니다. "
+                            "다시 확인해주세요: " + ", ".join(invalid_numbers)
                         )
-
-                    st.rerun()
-                else:
-                    st.warning(result["message"])
-
-                    if result.get("duplicate_numbers"):
-                        duplicate_text = ", ".join(
-                            result["duplicate_numbers"]
+                        problem_number_to_save = None
+                    else:
+                        offset = selected_xpattern_block["offset"]
+                        problem_number_to_save = ", ".join(
+                            str(offset + int(n)) for n in raw_numbers
                         )
-                        st.info(
-                            f"중복 감지된 문제번호: {duplicate_text}\n\n"
-                            "같은 학생·같은 교재에 이미 등록된 번호이므로 "
-                            "추가 저장하지 않았습니다."
-                        )
+                        exam_tag = selected_xpattern_block["exam_type"]
+                        note_prefix = f"[{selected_school}" + (f" {exam_tag}" if exam_tag else "") + "] "
+
+                if problem_number_to_save:
+                    result = add_wrong_answer(
+                        st.session_state.student_user,
+                        book,
+                        problem_number_to_save,
+                        (note_prefix + note.strip()).strip()
+                    )
+
+                    if result["saved"]:
+                        if xpattern_schools:
+                            st.success(
+                                f"'{selected_school}' 원래 번호 {problem_number.strip()} → "
+                                f"저장 번호 {', '.join(result['new_numbers'])}(으)로 "
+                                "변환되어 저장되었습니다."
+                            )
+                        else:
+                            saved_text = ", ".join(result["new_numbers"])
+                            st.success(f"새 문제번호 {saved_text}이(가) 저장되었습니다.")
+
+                        if result["duplicate_numbers"]:
+                            duplicate_text = ", ".join(result["duplicate_numbers"])
+                            st.info(
+                                f"이미 저장된 문제번호 {duplicate_text}은(는) "
+                                "중복 저장하지 않았습니다."
+                            )
+
+                        st.rerun()
+                    else:
+                        st.warning(result["message"])
+
+                        if result.get("duplicate_numbers"):
+                            duplicate_text = ", ".join(
+                                result["duplicate_numbers"]
+                            )
+                            st.info(
+                                f"중복 감지된 문제번호: {duplicate_text}\n\n"
+                                "같은 학생·같은 교재에 이미 등록된 번호이므로 "
+                                "추가 저장하지 않았습니다."
+                            )
 
         st.divider()
 
