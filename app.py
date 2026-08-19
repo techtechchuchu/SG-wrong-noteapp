@@ -128,6 +128,52 @@ XPATTERN_SCHOOL_MAP = {
     },
 }
 
+
+def format_xpattern_display_numbers(book: str, problem_str: str) -> str:
+    """
+    X-패턴 계열은 wrong_answers.problem에 학교별 오프셋이 더해진 내부 번호로
+    저장되어 있다(학생이 입력한 원래 시험지 번호가 아님 - build_auto.py PDF 생성이
+    이 내부 번호를 그대로 써야 하므로 저장값 자체는 바꾸지 않는다).
+    선생님 화면 등 사람이 읽는 표에서는 이 함수로 원래 시험지 번호로 되돌려 보여준다.
+    """
+    schools = XPATTERN_SCHOOL_MAP.get(book)
+    if not schools:
+        return problem_str
+
+    groups: dict = {}
+    unmatched = []
+
+    for number in parse_problem_numbers(problem_str):
+        n = int(number)
+        matched_school = None
+        matched_original = None
+
+        for school, blocks in schools.items():
+            for b in blocks:
+                if b["offset"] < n <= b["offset"] + b["max"]:
+                    matched_school = school
+                    matched_original = n - b["offset"]
+                    break
+            if matched_school:
+                break
+
+        if matched_school:
+            groups.setdefault(matched_school, []).append(str(matched_original))
+        else:
+            unmatched.append(number)
+
+    if not groups:
+        return problem_str
+
+    if len(groups) == 1 and not unmatched:
+        return ", ".join(next(iter(groups.values())))
+
+    parts = [f"{school}: {', '.join(nums)}" for school, nums in groups.items()]
+    if unmatched:
+        parts.append("확인필요: " + ", ".join(unmatched))
+    return " / ".join(parts)
+
+
 ROSTER_REQUIRED_COLUMNS = {
     "반명",
     "담당선생님",
@@ -2147,6 +2193,183 @@ def render_wrong_answer_book_editor(key_prefix: str):
             st.success(
                 f"{selected_row['학생']} 학생의 교재를 "
                 f"'{current_book}'에서 '{new_book}'으로 변경했습니다."
+            )
+            st.rerun()
+
+
+def update_wrong_answer_xpattern_school(
+    record_id: int,
+    original_numbers: list,
+    new_school: str,
+    new_block: dict,
+):
+    """
+    학생이 X-패턴 교재에서 학교를 잘못 선택해 엉뚱한 내부번호로 저장된 기록을,
+    관리자가 올바른 학교(+시험)를 다시 골라 원래 시험지 번호 기준으로 재변환합니다.
+    """
+    offset = new_block["offset"]
+    converted = [str(offset + int(n)) for n in original_numbers]
+    new_problem = ", ".join(converted)
+
+    exam_tag = new_block["exam_type"]
+    new_memo_prefix = f"[{new_school}" + (f" {exam_tag}" if exam_tag else "") + "] "
+
+    current = (
+        supabase.table("wrong_answers")
+        .select("memo")
+        .eq("id", int(record_id))
+        .limit(1)
+        .execute()
+    )
+    old_memo = str(current.data[0].get("memo", "") or "") if current.data else ""
+    # 기존 "[학교 시험]" 형태 태그가 있으면 새 태그로 교체하고, 없으면 뒤에 이어 붙인다.
+    stripped_memo = re.sub(r"^\[[^\]]*\]\s*", "", old_memo).strip()
+    new_memo = (new_memo_prefix + stripped_memo).strip()
+
+    (
+        supabase.table("wrong_answers")
+        .update({"problem": new_problem, "memo": new_memo})
+        .eq("id", int(record_id))
+        .execute()
+    )
+    cleanup_duplicate_wrong_answers()
+
+
+def render_xpattern_school_editor(key_prefix: str):
+    """
+    학생이 X-패턴 교재에서 학교를 잘못 골라 저장된 오답 기록을,
+    관리자가 올바른 학교(+시험)로 다시 지정할 수 있게 해줍니다.
+    """
+    records_df = get_wrong_answer_edit_records()
+    xpattern_books = list(XPATTERN_SCHOOL_MAP.keys())
+    records_df = records_df[records_df["교재"].isin(xpattern_books)].copy()
+
+    if records_df.empty:
+        st.info("수정할 X-패턴 오답 기록이 없습니다.")
+        return
+
+    students = ["전체"] + sorted(
+        records_df["학생"].dropna().astype(str).unique().tolist()
+    )
+
+    selected_student = st.selectbox(
+        "학생 선택",
+        students,
+        key=f"{key_prefix}_student",
+    )
+
+    filtered_df = records_df.copy()
+    if selected_student != "전체":
+        filtered_df = filtered_df[filtered_df["학생"] == selected_student]
+
+    option_map = {}
+    for _, row in filtered_df.iterrows():
+        date_text = str(row["작성일시"])[:10]
+        guess = format_xpattern_display_numbers(row["교재"], row["문제번호"])
+        label = (
+            f"{row['학생']} | {date_text} | {row['교재']} | "
+            f"저장값 {row['문제번호']} (추정 원래번호 {guess}) | ID {row['기록ID']}"
+        )
+        option_map[label] = int(row["기록ID"])
+
+    selected_label = st.selectbox(
+        "수정할 기록",
+        list(option_map.keys()),
+        key=f"{key_prefix}_record",
+    )
+
+    record_id = option_map[selected_label]
+    selected_row = filtered_df[
+        filtered_df["기록ID"] == record_id
+    ].iloc[0]
+
+    book = str(selected_row["교재"])
+    stored_problem = str(selected_row["문제번호"])
+    guessed_original = format_xpattern_display_numbers(book, stored_problem)
+
+    st.caption(
+        f"현재 저장된 내부번호: {stored_problem}  ·  "
+        f"현재 비고: {selected_row['비고'] or '(없음)'}"
+    )
+    st.warning(
+        "⚠️ 아래 '원래 시험지 번호'는 현재 저장값을 기준으로 자동 추정한 값입니다. "
+        "학생이 애초에 학교를 잘못 골라 저장 자체가 틀렸을 수 있으므로, "
+        "학생에게 실제 시험지 번호를 다시 확인받은 뒤 수정해주세요."
+    )
+
+    school_options = sorted(XPATTERN_SCHOOL_MAP[book].keys())
+    new_school = st.selectbox(
+        "올바른 학교로 다시 선택",
+        school_options,
+        key=f"{key_prefix}_school",
+    )
+
+    blocks = XPATTERN_SCHOOL_MAP[book][new_school]
+    if len(blocks) == 1:
+        new_block = blocks[0]
+    else:
+        block_labels = [
+            b["exam_type"] or f"{i + 1}번째 시험"
+            for i, b in enumerate(blocks)
+        ]
+        block_index = st.selectbox(
+            "시험 선택",
+            list(range(len(blocks))),
+            format_func=lambda i: block_labels[i],
+            key=f"{key_prefix}_block",
+        )
+        new_block = blocks[block_index]
+
+    st.caption(
+        f"'{new_school}'"
+        + (f" ({new_block['exam_type']})" if new_block["exam_type"] else "")
+        + f" 원래 번호는 1~{new_block['max']}까지 있습니다."
+    )
+
+    default_numbers = (
+        guessed_original
+        if re.fullmatch(r"[\d,\s]+", guessed_original or "")
+        else ""
+    )
+
+    original_input = st.text_input(
+        "원래 시험지 번호 (다시 확인해서 입력)",
+        value=default_numbers,
+        key=f"{key_prefix}_numbers",
+    )
+
+    confirm = st.checkbox(
+        "선택한 기록의 학교와 번호를 다시 저장합니다.",
+        key=f"{key_prefix}_confirm",
+    )
+
+    if st.button(
+        "학교 다시 지정",
+        key=f"{key_prefix}_button",
+        type="primary",
+    ):
+        raw_numbers = parse_problem_numbers(original_input)
+        max_number = new_block["max"]
+        invalid_numbers = [
+            n for n in raw_numbers if not (1 <= int(n) <= max_number)
+        ]
+
+        if not raw_numbers:
+            st.warning("원래 시험지 번호를 입력해주세요.")
+        elif invalid_numbers:
+            st.error(
+                f"'{new_school}'의 원래 번호는 1~{max_number}까지만 있습니다. "
+                "다시 확인해주세요: " + ", ".join(invalid_numbers)
+            )
+        elif not confirm:
+            st.warning("수정 확인 항목에 체크해주세요.")
+        else:
+            update_wrong_answer_xpattern_school(
+                record_id, raw_numbers, new_school, new_block
+            )
+            st.success(
+                f"{selected_row['학생']} 학생의 '{book}' 기록을 "
+                f"'{new_school}' 기준으로 다시 저장했습니다."
             )
             st.rerun()
 
@@ -7551,9 +7774,19 @@ def show_student():
             )
 
             if book_filter == "전체":
-                display_df = df
+                display_df = df.copy()
             else:
-                display_df = df[df["교재"] == book_filter]
+                display_df = df[df["교재"] == book_filter].copy()
+
+            if not display_df.empty:
+                # X-패턴 계열은 학생이 입력한 원래 번호가 아니라 학교별 내부 번호로
+                # 저장되므로, 본인 목록에서는 원래 시험지 번호로 되돌려 보여준다.
+                display_df["문제번호"] = display_df.apply(
+                    lambda row: format_xpattern_display_numbers(
+                        row["교재"], row["문제번호"]
+                    ),
+                    axis=1,
+                )
 
             st.dataframe(
                 display_df,
@@ -7710,6 +7943,16 @@ def show_admin():
                 display_df = display_df[display_df["학년"] == grade_filter]
             if book_filter != "전체":
                 display_df = display_df[display_df["교재"] == book_filter]
+
+            if not display_df.empty:
+                # X-패턴 계열만 내부 번호(예: 3604)를 원래 시험지 번호(예: 4)로 되돌려 표시.
+                # 저장된 wrong_answers 값 자체는 그대로라 오답노트 생성 파이프라인에는 영향 없음.
+                display_df["문제번호"] = display_df.apply(
+                    lambda row: format_xpattern_display_numbers(
+                        row["교재"], row["문제번호"]
+                    ),
+                    axis=1,
+                )
 
             if current_teacher == ALL_TEACHER_ADMIN:
                 st.caption(
@@ -8555,8 +8798,20 @@ def show_superadmin():
         st.divider()
 
         with st.expander("✏️ 오답 기록 교재 수정", expanded=False):
-            st.info("학생이 잘못 선택한 교재를 수정할 수 있습니다.")
-            render_wrong_answer_book_editor("superadmin")
+            edit_tab_book, edit_tab_xpattern = st.tabs(
+                ["📚 교재 변경", "🏫 X-패턴 학교 재지정"]
+            )
+
+            with edit_tab_book:
+                st.info("학생이 잘못 선택한 교재를 수정할 수 있습니다.")
+                render_wrong_answer_book_editor("superadmin")
+
+            with edit_tab_xpattern:
+                st.info(
+                    "학생이 X-패턴 교재에서 학교를 잘못 골라 저장된 기록을 "
+                    "올바른 학교(+시험)로 다시 지정합니다."
+                )
+                render_xpattern_school_editor("superadmin_xpattern")
 
         st.divider()
 
