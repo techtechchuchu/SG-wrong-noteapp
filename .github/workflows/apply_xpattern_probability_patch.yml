@@ -1,23 +1,16 @@
 name: Apply X-Pattern probability config patch
 
-on:
-  push:
-    branches: [main]
-    paths:
-      - '.github/workflows/apply_xpattern_probability_patch.yml'
+on: push
 
 permissions:
   contents: write
 
 jobs:
   apply-patch:
-    if: github.event.head_commit.message == 'chore: apply xpattern config patch'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: main
 
       - name: Apply app.py patch
         run: python scripts/patch_xpattern_probability.py
@@ -25,7 +18,7 @@ jobs:
       - name: Verify Python syntax
         run: python -m py_compile app.py
 
-      - name: Commit app.py
+      - name: Commit app.py when changed
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
