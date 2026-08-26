@@ -1,3 +1,5 @@
+import re
+
 import pandas as pd
 import streamlit as st
 from supabase import create_client
@@ -8,6 +10,14 @@ st.set_page_config(
     page_icon="✏️",
     layout="centered",
 )
+
+
+# X-패턴은 DB에 학교별 offset이 더해진 내부번호로 저장됩니다.
+# 대부분 100단위 offset을 사용하며, 일부 교재만 예외 offset을 사용합니다.
+XPATTERN_SPECIAL_OFFSETS = {
+    "X-패턴 공통수학2": [3008],
+    "X-패턴 미적분1": [1816, 2115],
+}
 
 
 def get_supabase_client():
@@ -59,6 +69,49 @@ def fetch_active_book_names(client) -> list[str]:
         )
     except Exception:
         return []
+
+
+def parse_numbers(value: str) -> list[int]:
+    return [int(number) for number in re.findall(r"\d+", str(value or ""))]
+
+
+def infer_xpattern_offset(book: str, problem: str) -> int | None:
+    """저장된 내부번호 묶음에서 사용 중인 X-패턴 offset을 추정합니다."""
+    if not str(book).startswith("X-패턴"):
+        return None
+
+    numbers = parse_numbers(problem)
+    if not numbers:
+        return None
+
+    regular_offsets = list(range(500, 3901, 100))
+    candidates = regular_offsets + XPATTERN_SPECIAL_OFFSETS.get(str(book), [])
+
+    valid_offsets = [
+        offset
+        for offset in candidates
+        if all(1 <= number - offset <= 100 for number in numbers)
+    ]
+
+    return max(valid_offsets) if valid_offsets else None
+
+
+def xpattern_original_problem(book: str, problem: str) -> tuple[str, int | None]:
+    """DB 내부번호를 학생이 보는 원래 시험지 번호로 변환합니다."""
+    offset = infer_xpattern_offset(book, problem)
+    numbers = parse_numbers(problem)
+
+    if offset is None or not numbers:
+        return str(problem or ""), None
+
+    original_numbers = [number - offset for number in numbers]
+    return ", ".join(str(number) for number in original_numbers), offset
+
+
+def xpattern_internal_problem(problem: str, offset: int) -> str:
+    """학생이 입력한 원래 번호를 DB 저장용 내부번호로 변환합니다."""
+    numbers = parse_numbers(problem)
+    return ", ".join(str(offset + number) for number in numbers)
 
 
 def record_is_mine(client, username: str, record_id: int) -> bool:
@@ -159,10 +212,11 @@ row_map = {
 def option_label(record_id: int) -> str:
     row = row_map[record_id]
     book = str(row.get("unit", "") or "교재 미지정")
-    problem = str(row.get("problem", "") or "문제번호 없음")
+    raw_problem = str(row.get("problem", "") or "문제번호 없음")
+    display_problem, _ = xpattern_original_problem(book, raw_problem)
     created_at = str(row.get("created_at", "") or "")
     date_text = created_at[:10] if created_at else "날짜 없음"
-    return f"{book} · {problem}번 · {date_text}"
+    return f"{book} · {display_problem}번 · {date_text}"
 
 
 selected_id = st.selectbox(
@@ -172,12 +226,19 @@ selected_id = st.selectbox(
 )
 selected = row_map[int(selected_id)]
 
+current_book = str(selected.get("unit", "") or "").strip()
+current_raw_problem = str(selected.get("problem", "") or "")
+current_display_problem, current_xpattern_offset = xpattern_original_problem(
+    current_book,
+    current_raw_problem,
+)
+
 st.markdown("#### 현재 저장된 기록")
 preview = pd.DataFrame(
     [
         {
-            "교재": selected.get("unit", ""),
-            "문제번호": selected.get("problem", ""),
+            "교재": current_book,
+            "문제번호": current_display_problem,
             "메모": selected.get("memo", ""),
             "저장일시": selected.get("created_at", ""),
         }
@@ -191,8 +252,9 @@ with edit_tab:
     st.markdown("#### 오답 기록 수정")
 
     active_books = fetch_active_book_names(supabase)
-    current_book = str(selected.get("unit", "") or "").strip()
-    selectable_books = list(dict.fromkeys(([current_book] if current_book else []) + active_books))
+    selectable_books = list(
+        dict.fromkeys(([current_book] if current_book else []) + active_books)
+    )
 
     if not selectable_books:
         selectable_books = [current_book] if current_book else ["미지정"]
@@ -209,22 +271,24 @@ with edit_tab:
         index=current_book_index,
         key=f"edit_book_{selected_id}",
     )
+
     edited_problem = st.text_input(
         "문제번호",
-        value=str(selected.get("problem", "") or ""),
+        value=current_display_problem,
         key=f"edit_problem_{selected_id}",
-        help="여러 문제를 한 기록에 저장한 경우 기존 입력 형식대로 작성해주세요.",
+        help="쉼표나 띄어쓰기로 여러 문제번호를 입력할 수 있습니다.",
     )
+
     edited_memo = st.text_area(
         "메모",
         value=str(selected.get("memo", "") or ""),
         key=f"edit_memo_{selected_id}",
     )
 
-    if current_book.startswith("X-패턴") or str(edited_book).startswith("X-패턴"):
-        st.warning(
-            "X-패턴 교재는 학교별 내부 문제번호 변환이 적용됩니다. "
-            "X-패턴 기록의 교재 또는 문제번호를 수정할 때는 선생님에게 확인해주세요."
+    if current_book.startswith("X-패턴") and current_xpattern_offset is not None:
+        st.info(
+            "X-패턴도 직접 수정할 수 있습니다. 화면에는 원래 시험지 문제번호가 표시되며, "
+            "저장할 때 앱이 내부번호로 자동 변환합니다."
         )
 
     update_confirm = st.checkbox(
@@ -243,21 +307,52 @@ with edit_tab:
             st.warning("교재를 선택해주세요.")
         elif not edited_problem.strip():
             st.warning("문제번호를 입력해주세요.")
+        elif not parse_numbers(edited_problem):
+            st.warning("올바른 문제번호를 입력해주세요.")
         else:
             try:
                 if not record_is_mine(supabase, username, int(selected_id)):
                     st.error("수정 권한이 없거나 이미 삭제된 기록입니다.")
                 else:
-                    update_my_wrong_answer(
-                        supabase,
-                        username,
-                        int(selected_id),
-                        str(edited_book),
-                        edited_problem,
-                        edited_memo,
-                    )
-                    st.success("오답 기록을 수정했습니다.")
-                    st.rerun()
+                    problem_to_save = edited_problem.strip()
+
+                    # 같은 X-패턴 교재 안에서 수정하는 경우 원래 번호를 내부번호로 자동 변환합니다.
+                    if (
+                        current_book.startswith("X-패턴")
+                        and str(edited_book) == current_book
+                        and current_xpattern_offset is not None
+                    ):
+                        original_numbers = parse_numbers(edited_problem)
+                        if any(number < 1 or number > 100 for number in original_numbers):
+                            st.warning("X-패턴 문제번호는 원래 시험지 번호로 입력해주세요.")
+                            st.stop()
+                        problem_to_save = xpattern_internal_problem(
+                            edited_problem,
+                            current_xpattern_offset,
+                        )
+
+                    # X-패턴 교재 자체를 다른 X-패턴 교재로 바꾸는 경우 학교별 offset을
+                    # 자동 판단할 수 없으므로 교재 변경만 제한하고, 문제번호 수정은 허용합니다.
+                    if (
+                        current_book.startswith("X-패턴")
+                        and str(edited_book).startswith("X-패턴")
+                        and str(edited_book) != current_book
+                    ):
+                        st.warning(
+                            "X-패턴 교재를 다른 X-패턴 교재로 바꾸는 경우에는 학교 정보가 달라질 수 있습니다. "
+                            "기존 기록을 삭제한 뒤 새 교재에서 다시 저장해주세요."
+                        )
+                    else:
+                        update_my_wrong_answer(
+                            supabase,
+                            username,
+                            int(selected_id),
+                            str(edited_book),
+                            problem_to_save,
+                            edited_memo,
+                        )
+                        st.success("오답 기록을 수정했습니다.")
+                        st.rerun()
             except Exception as error:
                 st.error("오답 수정 중 오류가 발생했습니다.")
                 st.code(f"{type(error).__name__}: {error}", language="text")
