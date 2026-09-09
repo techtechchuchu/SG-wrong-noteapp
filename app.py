@@ -1310,6 +1310,15 @@ def get_student_allowed_books(username: str) -> list[str]:
     return get_active_book_names()
 
 
+
+
+def split_roster_books(value) -> list[str]:
+    """학생 명단의 쉼표 구분 교재 문자열을 개별 교재명으로 분리합니다."""
+    raw = str(value or "").strip()
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split(',') if part.strip()]
+
 def get_teacher_student_status_df() -> pd.DataFrame:
     """명단 기준으로 학생별 오답 작성 여부와 문제 개수를 계산합니다."""
     roster = get_roster_df()
@@ -1352,23 +1361,26 @@ def get_teacher_student_status_df() -> pd.DataFrame:
     records = []
 
     for _, row in roster.iterrows():
-        key = (str(row["학생명"]), str(row["매칭교재"]))
-        answer = answer_map.get(key, {"numbers": [], "latest": ""})
-        count = len(answer["numbers"])
+        roster_books = split_roster_books(row["매칭교재"]) or [str(row["매칭교재"]).strip()]
 
-        records.append(
-            {
-                "담당선생님": row["담당선생님"],
-                "반명": row["반명"],
-                "학생명": row["학생명"],
-                "학교명": row["학교명"],
-                "학년": row["학년"],
-                "매칭교재": row["매칭교재"],
-                "작성여부": "O" if count > 0 else "X",
-                "작성문제수": count,
-                "최근작성일시": answer["latest"],
-            }
-        )
+        for roster_book in roster_books:
+            key = (str(row["학생명"]).strip(), roster_book)
+            answer = answer_map.get(key, {"numbers": [], "latest": ""})
+            count = len(answer["numbers"])
+
+            records.append(
+                {
+                    "담당선생님": row["담당선생님"],
+                    "반명": row["반명"],
+                    "학생명": row["학생명"],
+                    "학교명": row["학교명"],
+                    "학년": row["학년"],
+                    "매칭교재": roster_book,
+                    "작성여부": "O" if count > 0 else "X",
+                    "작성문제수": count,
+                    "최근작성일시": answer["latest"],
+                }
+            )
 
     return pd.DataFrame(records)
 
@@ -8035,10 +8047,28 @@ def show_admin():
                 roster["담당선생님"] == current_teacher
             ][["학생명", "매칭교재"]].drop_duplicates()
 
+            # 한 학생의 명단 교재가 "교재A, 교재B"처럼 한 셀에 여러 개 들어간 경우
+            # 실제 wrong_answers.unit의 개별 교재명과 정상적으로 매칭되도록 행을 분리합니다.
+            expanded_rows = []
+            for _, roster_row in teacher_roster.iterrows():
+                books = split_roster_books(roster_row["매칭교재"])
+                for roster_book in books:
+                    expanded_rows.append(
+                        {
+                            "학생명": str(roster_row["학생명"]).strip(),
+                            "매칭교재": roster_book,
+                        }
+                    )
+
+            teacher_roster_expanded = pd.DataFrame(
+                expanded_rows,
+                columns=["학생명", "매칭교재"],
+            ).drop_duplicates()
+
             # 같은 이름의 다른 학생 또는 다른 교재 기록이 섞이지 않도록
-            # 학생명 + 교재를 함께 기준으로 로그인한 선생님의 기록만 표시합니다.
+            # 학생명 + 개별 교재를 함께 기준으로 로그인한 선생님의 기록만 표시합니다.
             df = df.merge(
-                teacher_roster,
+                teacher_roster_expanded,
                 left_on=["학생", "교재"],
                 right_on=["학생명", "매칭교재"],
                 how="inner"
