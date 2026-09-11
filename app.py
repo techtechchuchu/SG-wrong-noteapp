@@ -106,7 +106,7 @@ XPATTERN_SCHOOL_MAP = {
         "24 함월고": [{"offset": 1700, "max": 21, "exam_type": '2학기중간'}],
         "24 화암고": [{"offset": 1500, "max": 21, "exam_type": '2학기중간'}],
         "24 현대고": [{"offset": 1600, "max": 22, "exam_type": '2학기중간'}],
-        "24 학성여고": [{"offset": 1816, "max": 4, "exam_type": '2학기중간'}],
+        "24 학성여고": [{"offset": 1816, "max": 25, "exam_type": '2학기중간'}],
         "24 중앙여고": [{"offset": 2115, "max": 5, "exam_type": '2학기중간'}],
         "24 약사고": [{"offset": 2400, "max": 21, "exam_type": '2학기중간'}],
         "24 우신고": [{"offset": 2500, "max": 20, "exam_type": '2학기중간'}],
