@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ONO ACADEMY | 학원 운영의 새로운 기준</title>
+  <meta name="description" content="학생관리, 출결, 오답, 상담, 홍보까지 하나로 연결하는 AI 학원 운영 플랫폼 ONO ACADEMY." />
+  <style>
+    :root{
+      --bg:#f6f8fc;--card:#fff;--text:#0f172a;--muted:#64748b;--line:#e5e7eb;
+      --blue:#2563eb;--blue2:#4f7cff;--green:#16a34a;--red:#ef4444;--orange:#f59e0b;--purple:#7c3aed;
+      --shadow:0 18px 60px rgba(15,23,42,.09);--r:22px;
+    }
+    *{box-sizing:border-box} html{scroll-behavior:smooth}
+    body{margin:0;font-family:Pretendard,"Noto Sans KR","Apple SD Gothic Neo",Arial,sans-serif;background:var(--bg);color:var(--text)}
+    a{text-decoration:none;color:inherit} button{font:inherit}
+    .container{width:min(1180px,calc(100% - 36px));margin:auto}
+    nav{position:sticky;top:0;z-index:30;background:rgba(255,255,255,.88);backdrop-filter:blur(16px);border-bottom:1px solid rgba(226,232,240,.85)}
+    .nav-in{height:72px;display:flex;align-items:center;justify-content:space-between;gap:20px}
+    .brand{display:flex;align-items:center;gap:10px;font-weight:950;letter-spacing:-.04em}
+    .logo{width:38px;height:38px;border-radius:13px;display:grid;place-items:center;color:#fff;background:linear-gradient(135deg,var(--blue),var(--purple));box-shadow:0 8px 22px rgba(37,99,235,.22)}
+    .brand span{font-size:20px}.brand small{font-size:10px;color:var(--muted);display:block;font-weight:700;letter-spacing:-.02em}
+    .links{display:flex;gap:27px;font-size:14px;color:#334155;font-weight:800}
+    .actions{display:flex;gap:10px}
+    .btn{border:0;border-radius:14px;padding:13px 18px;font-weight:900;cursor:pointer;transition:.2s}
+    .btn:hover{transform:translateY(-1px)}
+    .primary{color:white;background:linear-gradient(135deg,var(--blue),var(--blue2));box-shadow:0 10px 25px rgba(37,99,235,.2)}
+    .ghost{background:#fff;color:#1d4ed8;border:1px solid #bfdbfe}
+    .hero{padding:82px 0 64px;overflow:hidden;background:
+      radial-gradient(circle at 10% 15%,rgba(59,130,246,.12),transparent 30%),
+      radial-gradient(circle at 85% 18%,rgba(124,58,237,.10),transparent 28%),
+      linear-gradient(180deg,#fff,#f8fbff)}
+    .hero-grid{display:grid;grid-template-columns:1fr 1.15fr;gap:48px;align-items:center}
+    .pill{display:inline-flex;align-items:center;gap:7px;padding:9px 13px;border-radius:999px;background:#eff6ff;border:1px solid #bfdbfe;color:#1d4ed8;font-size:13px;font-weight:900}
+    h1{font-size:56px;line-height:1.08;letter-spacing:-.06em;margin:22px 0 20px}
+    .gradient{background:linear-gradient(90deg,#2563eb,#7c3aed);-webkit-background-clip:text;background-clip:text;color:transparent}
+    .lead{font-size:19px;line-height:1.75;color:#475569;margin:0 0 28px;max-width:560px}
+    .hero-cta{display:flex;gap:12px;flex-wrap:wrap}.note{margin-top:18px;color:#64748b;font-size:13px}
+    .dash{background:#fff;border:1px solid #e2e8f0;border-radius:26px;padding:15px;box-shadow:var(--shadow)}
+    .dash-head{display:flex;justify-content:space-between;align-items:center;padding:7px 8px 14px}
+    .dash-title{font-weight:950}.dash-user{font-size:12px;color:#64748b}
+    .dash-grid{display:grid;grid-template-columns:150px 1fr;gap:12px}
+    .side{background:#f8fafc;border:1px solid #e2e8f0;border-radius:17px;padding:9px}
+    .side div{padding:10px 11px;border-radius:11px;font-size:12px;font-weight:800;color:#475569;margin:2px 0}
+    .side .on{background:#eaf2ff;color:#1d4ed8}
+    .main{display:grid;gap:10px}
+    .stats{display:grid;grid-template-columns:repeat(4,1fr);gap:9px}
+    .stat{border:1px solid #e2e8f0;border-radius:15px;padding:13px;background:#fff}.stat span{font-size:10px;color:#64748b;font-weight:800}.stat b{display:block;font-size:22px;margin-top:7px}
+    .g b{color:var(--green)}.r b{color:var(--red)}.o b{color:var(--orange)}.p b{color:var(--purple)}
+    .middle{display:grid;grid-template-columns:1.2fr .9fr;gap:9px}.panel{border:1px solid #e2e8f0;border-radius:15px;padding:14px;background:#fff}.panel h3{margin:0 0 10px;font-size:13px}
+    .alert{padding:8px 0;border-bottom:1px solid #f1f5f9;font-size:11px;color:#475569}.alert:last-child{border-bottom:0}
+    .bars{height:108px;display:flex;gap:7px;align-items:flex-end}.bar{flex:1;border-radius:7px 7px 3px 3px;background:linear-gradient(180deg,#93c5fd,#2563eb)}
+    .quick{display:grid;grid-template-columns:repeat(5,1fr);gap:7px}.quick div{border:1px solid #e2e8f0;border-radius:13px;padding:11px 4px;text-align:center;font-size:10px;font-weight:800}
+    section{padding:78px 0}.section-head{text-align:center;margin-bottom:35px}.section-head h2{font-size:36px;letter-spacing:-.045em;margin:0 0 10px}.section-head p{color:#64748b;margin:0}
+    .features{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.feature{background:#fff;border:1px solid #e2e8f0;border-radius:20px;padding:24px;box-shadow:0 8px 28px rgba(15,23,42,.04)}
+    .icon{width:44px;height:44px;border-radius:14px;display:grid;place-items:center;background:#eff6ff;font-size:20px;margin-bottom:16px}.feature h3{margin:0 0 9px;font-size:18px}.feature p{margin:0;color:#64748b;line-height:1.65;font-size:14px}
+    .ai{background:#0f172a;color:#fff}.ai .section-head p{color:#94a3b8}.ai-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px}
+    .ai-card{background:linear-gradient(180deg,#172033,#111827);border:1px solid #334155;border-radius:22px;padding:26px}.ai-card b{display:block;font-size:19px;margin-bottom:9px}.ai-card p{margin:0;color:#cbd5e1;line-height:1.7;font-size:14px}
+    .flow{display:flex;gap:8px;align-items:center;margin-top:18px;flex-wrap:wrap}.flow span{background:#1e293b;border:1px solid #334155;border-radius:999px;padding:8px 11px;font-size:12px}.flow i{color:#64748b}
+    .pricing{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}.price{background:#fff;border:1px solid #e2e8f0;border-radius:22px;padding:25px;position:relative}.price.hot{border:2px solid #3b82f6;transform:translateY(-7px);box-shadow:var(--shadow)}
+    .tag{position:absolute;right:18px;top:18px;background:#2563eb;color:#fff;padding:6px 9px;border-radius:999px;font-size:10px;font-weight:900}.price h3{margin:0 0 7px}.amount{font-size:30px;font-weight:950;margin:18px 0}.amount small{font-size:12px;color:#64748b;font-weight:700}.price ul{padding-left:18px;color:#475569;line-height:1.9;font-size:14px}
+    .cta{padding:68px 0}.cta-box{background:linear-gradient(135deg,#2563eb,#6d4aff);color:white;border-radius:28px;padding:50px;text-align:center;box-shadow:0 20px 60px rgba(37,99,235,.22)}.cta-box h2{font-size:38px;margin:0 0 12px;letter-spacing:-.05em}.cta-box p{color:#dbeafe;margin:0 0 24px}
+    footer{padding:30px 0 45px;color:#64748b;font-size:12px}.foot{display:flex;justify-content:space-between;gap:20px}
+    @media(max-width:900px){.links{display:none}.hero-grid,.ai-grid{grid-template-columns:1fr}.features,.pricing{grid-template-columns:1fr 1fr}.hero{padding-top:54px}h1{font-size:45px}}
+    @media(max-width:640px){.container{width:min(100% - 24px,1180px)}.actions .ghost{display:none}.hero-grid{gap:30px}h1{font-size:39px}.lead{font-size:17px}.dash-grid{grid-template-columns:1fr}.side{display:none}.stats{grid-template-columns:1fr 1fr}.middle{grid-template-columns:1fr}.quick{grid-template-columns:repeat(3,1fr)}.features,.pricing{grid-template-columns:1fr}.section-head h2{font-size:30px}.cta-box{padding:36px 22px}.cta-box h2{font-size:31px}.foot{flex-direction:column}}
+  </style>
+</head>
+<body>
+<nav>
+  <div class="container nav-in">
+    <a class="brand" href="#"><div class="logo">O</div><div><span>ONO ACADEMY</span><small>AI ACADEMY OPERATING SYSTEM</small></div></a>
+    <div class="links"><a href="#features">주요 기능</a><a href="#ai">AI 자동화</a><a href="#price">요금제</a><a href="#contact">도입문의</a></div>
+    <div class="actions"><button class="btn ghost" onclick="alert('MVP 데모입니다.')">로그인</button><a class="btn primary" href="#contact">무료 데모 신청</a></div>
+  </div>
+</nav>
+
+<header class="hero">
+  <div class="container hero-grid">
+    <div>
+      <div class="pill">✨ AI로 더 스마트한 학원 운영</div>
+      <h1>학원 운영의<br>새로운 기준, <span class="gradient">ONO</span></h1>
+      <p class="lead">학생관리부터 출결, 오답, 상담, 홍보까지.<br>복잡한 학원 업무를 하나의 직관적인 화면에서 관리하고, 반복업무는 AI가 대신합니다.</p>
+      <div class="hero-cta"><a class="btn primary" href="#features">MVP 둘러보기 →</a><button class="btn ghost" onclick="document.querySelector('#contact').scrollIntoView()">도입 문의하기</button></div>
+      <div class="note">현재 학원 현장용 MVP를 개발 중입니다.</div>
+    </div>
+
+    <div class="dash">
+      <div class="dash-head"><div class="dash-title">오늘의 학원</div><div class="dash-user">관리자 · 2026.09</div></div>
+      <div class="dash-grid">
+        <div class="side">
+          <div class="on">⌂ 홈</div><div>👥 학생관리</div><div>📚 수업/반</div><div>✅ 출결관리</div><div>📝 오답관리</div><div>📈 성적관리</div><div>💬 상담관리</div><div>💳 수납관리</div><div>✨ AI 홍보실</div><div>⚙ 설정</div>
+        </div>
+        <div class="main">
+          <div class="stats">
+            <div class="stat g"><span>오늘 출석</span><b>142/155</b></div>
+            <div class="stat r"><span>미납 학생</span><b>9명</b></div>
+            <div class="stat o"><span>오답 미제출</span><b>23명</b></div>
+            <div class="stat p"><span>상담 예정</span><b>6건</b></div>
+          </div>
+          <div class="middle">
+            <div class="panel"><h3>최근 알림</h3><div class="alert">🔴 이도헌 학생 오답 제출 확인이 필요합니다.</div><div class="alert">🟠 고1 내신심화반 오답 Paper 12건 미출력</div><div class="alert">🔵 신규 상담 학생 3명 등록</div><div class="alert">🟢 오늘 출석률 91.6%</div></div>
+            <div class="panel"><h3>이번 주 출석 현황</h3><div class="bars"><div class="bar" style="height:68%"></div><div class="bar" style="height:82%"></div><div class="bar" style="height:76%"></div><div class="bar" style="height:92%"></div><div class="bar" style="height:66%"></div><div class="bar" style="height:84%"></div><div class="bar" style="height:71%"></div></div></div>
+          </div>
+          <div class="quick"><div>➕ 학생 등록</div><div>✅ 출결 입력</div><div>📝 오답 출력</div><div>✉ 문자 발송</div><div>💬 상담 기록</div></div>
+        </div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<section id="features">
+  <div class="container">
+    <div class="section-head"><h2>메뉴가 아니라, <span class="gradient">업무가 보이도록</span></h2><p>기존 학원 ERP의 복잡한 메뉴 구조를 오늘 해야 할 일 중심으로 다시 설계합니다.</p></div>
+    <div class="features">
+      <div class="feature"><div class="icon">👥</div><h3>학생 통합 관리</h3><p>학생 정보, 학교, 반, 담당 강사, 상담 기록을 한 화면에서 확인합니다.</p></div>
+      <div class="feature"><div class="icon">✅</div><h3>출결 · 반 관리</h3><p>오늘 출석부터 반 편성, 시간표까지 빠르게 관리합니다.</p></div>
+      <div class="feature"><div class="icon">📝</div><h3>ONO 오답관리</h3><p>학생이 제출한 오답을 자동 수집하고 개인별 오답 Paper 제작까지 연결합니다.</p></div>
+      <div class="feature"><div class="icon">💬</div><h3>상담 관리</h3><p>상담 일정과 기록을 학생별로 누적하고 필요한 후속조치를 놓치지 않습니다.</p></div>
+      <div class="feature"><div class="icon">📊</div><h3>통계 · 분석</h3><p>출결, 성적, 오답, 상담 데이터를 원장과 강사가 바로 이해할 수 있게 보여줍니다.</p></div>
+      <div class="feature"><div class="icon">✨</div><h3>AI 홍보실</h3><p>신규반, 시험대비, 학원 소식을 입력하면 SNS·문자·블로그 홍보안을 자동 생성합니다.</p></div>
+    </div>
+  </div>
+</section>
+
+<section class="ai" id="ai">
+  <div class="container">
+    <div class="section-head"><h2>학원에 필요한 AI를 <span class="gradient">실제 업무에</span></h2><p>챗봇을 붙이는 데서 끝나지 않고, 반복 업무 자체를 줄입니다.</p></div>
+    <div class="ai-grid">
+      <div class="ai-card"><b>✨ AI 홍보 자동화</b><p>관리자가 Canva에서 매번 처음부터 만드는 대신, 신규반·시험대비·성과 데이터를 선택하면 홍보 문구와 카드뉴스 구성을 자동으로 제안합니다.</p><div class="flow"><span>학원 정보</span><i>→</i><span>AI 기획</span><i>→</i><span>SNS / 문자 / 블로그</span></div></div>
+      <div class="ai-card"><b>🎧 AI 수업 복습</b><p>허용된 수업 녹음과 수업자료를 바탕으로 핵심 개념, 강조 포인트, 복습 퀴즈를 생성해 학생의 복습까지 연결합니다.</p><div class="flow"><span>수업</span><i>→</i><span>AI 정리</span><i>→</i><span>복습</span><i>→</i><span>오답</span></div></div>
+    </div>
+  </div>
+</section>
+
+<section id="price">
+  <div class="container">
+    <div class="section-head"><h2>학원 규모에 맞춰 시작하세요</h2><p>MVP 단계의 예시 요금제이며 실제 출시 전 변경될 수 있습니다.</p></div>
+    <div class="pricing">
+      <div class="price"><h3>Starter</h3><p>소형 학원 / 공부방</p><div class="amount">₩49,000 <small>/ 월</small></div><ul><li>학생 50명</li><li>학생·반·출결 관리</li><li>ONO 오답관리</li><li>기본 통계</li></ul><a class="btn ghost" href="#contact">문의하기</a></div>
+      <div class="price hot"><span class="tag">추천</span><h3>Standard</h3><p>중소형 학원</p><div class="amount">₩99,000 <small>/ 월</small></div><ul><li>학생 200명</li><li>Starter 전체 기능</li><li>AI 홍보실</li><li>상담·학습 데이터 분석</li></ul><a class="btn primary" href="#contact">데모 신청</a></div>
+      <div class="price"><h3>Pro</h3><p>대형 학원 / 다지점</p><div class="amount">별도 문의</div><ul><li>학생 수 확장</li><li>다지점 관리</li><li>AI 수업 복습</li><li>관리자 권한 세분화</li></ul><a class="btn ghost" href="#contact">문의하기</a></div>
+    </div>
+  </div>
+</section>
+
+<section class="cta" id="contact">
+  <div class="container"><div class="cta-box"><h2>학원 업무, 더 복잡할 필요 없습니다.</h2><p>ONO ACADEMY MVP 도입 및 테스트 학원을 모집합니다.</p><button class="btn" style="background:#fff;color:#1d4ed8" onclick="alert('MVP 문의 폼은 다음 단계에서 연결할 수 있습니다.')">도입 문의하기 →</button></div></div>
+</section>
+
+<footer><div class="container foot"><div><b>ONO ACADEMY</b><br>AI-powered academy operating system</div><div>© 2026 ONO. MVP Concept.</div></div></footer>
+</body>
+</html>
