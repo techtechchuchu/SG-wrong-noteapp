@@ -4607,24 +4607,24 @@ def call_sg_ai_student_counselor(
     user_message: str,
     conversation: list[dict],
 ) -> str:
-    """학생용 AI 학습 상담사 수잔 답변을 생성합니다."""
+    """학생용 SG 고등관 AI 학습 상담사 수잔 답변을 생성합니다."""
     if is_unclear_counselor_message(user_message):
         return "제가 잘 이해하지 못했어요. 조금 더 구체적으로 말씀해 주세요."
 
     if not OPENAI_API_KEY:
         return (
-            "AI 학습 상담사 수잔를 사용하려면 관리자에게 AI 기능 설정을 요청해주세요."
+            "SG 고등관 AI 학습 상담사 수잔를 사용하려면 관리자에게 AI 기능 설정을 요청해주세요."
         )
 
     history_text = ""
     for message in conversation[-8:]:
-        role = "학생" if message.get("role") == "user" else "AI 학습 상담사 수잔"
+        role = "학생" if message.get("role") == "user" else "SG 고등관 AI 학습 상담사 수잔"
         content = str(message.get("content", "")).strip()
         if content:
             history_text += f"{role}: {content}\n"
 
     instructions = """
-너는 수학학원 학생을 돕는 'AI 학습 상담사 수잔'다.
+너는 수학학원 학생을 돕는 'SG 고등관 AI 학습 상담사 수잔'다.
 학생의 오답 제출 기록과 등록 교재를 참고하여 공부 방향과 복습 방법을 도와준다.
 정답만 대신 주기보다는 학생이 스스로 공부를 이어갈 수 있게 구체적으로 안내한다.
 학생의 성격, 가정환경, 정신건강, 의지나 태도를 근거 없이 추측하지 않는다.
@@ -4681,15 +4681,15 @@ def call_sg_ai_student_counselor(
 
     except urllib.error.HTTPError as error:
         return (
-            "AI 학습 상담사 수잔 연결 중 오류가 발생했습니다. "
+            "SG 고등관 AI 학습 상담사 수잔 연결 중 오류가 발생했습니다. "
             f"관리자에게 문의해주세요. ({error.code})"
         )
     except Exception:
-        return "AI 학습 상담사 수잔 연결 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+        return "SG 고등관 AI 학습 상담사 수잔 연결 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
 
 
 def render_student_sg_ai_counselor(student_name: str):
-    """학생 로그인 화면에서 사용하는 AI 학습 상담사 수잔 UI입니다."""
+    """학생 로그인 화면에서 사용하는 SG 고등관 AI 학습 상담사 수잔 UI입니다."""
     roster = get_roster_df()
     if roster.empty:
         student_roster = pd.DataFrame(
@@ -4728,7 +4728,7 @@ def render_student_sg_ai_counselor(student_name: str):
     if state_key not in st.session_state:
         st.session_state[state_key] = []
 
-    st.markdown("### 🤖 AI 학습 상담사 수잔")
+    st.markdown("### 🤖 SG 고등관 AI 학습 상담사 수잔")
     st.caption(
         "내 오답 기록을 바탕으로 복습 방향과 공부 계획을 함께 정리해주는 AI 상담사입니다."
     )
@@ -4783,7 +4783,7 @@ def render_student_sg_ai_counselor(student_name: str):
             st.write(message["content"])
 
     user_message = st.chat_input(
-        "수잔에게 공부 고민을 물어보세요",
+        "SG 고등관 수잔에게 공부 고민을 물어보세요",
         key=f"student_ai_chat_{student_name}",
     )
 
@@ -4796,7 +4796,7 @@ def render_student_sg_ai_counselor(student_name: str):
             st.write(user_message)
 
         with st.chat_message("assistant", avatar="🤖"):
-            with st.spinner("수잔이 학습 기록을 살펴보고 있어요..."):
+            with st.spinner("SG 고등관 수잔이 학습 기록을 살펴보고 있어요..."):
                 answer = call_sg_ai_student_counselor(
                     student_context,
                     user_message,
@@ -9202,7 +9202,7 @@ def show_student():
             st.write("")
             st.write("")
             with st.popover(
-                "🤖 AI 학습 상담사 수잔",
+                "🤖 SG 고등관 AI 학습 상담사 수잔",
                 use_container_width=True,
             ):
                 render_student_sg_ai_counselor(
