@@ -3600,7 +3600,7 @@ def render_weekly_missing_students():
 
 
 def render_daily_submission_counts():
-    """전체 관리자용 학생 날짜별 오답 제출 건수 화면입니다."""
+    """전체 관리자용 선생님별 학생 날짜별 오답 문제 수 화면입니다."""
     current_teacher = st.session_state.teacher_name
 
     if current_teacher != ALL_TEACHER_ADMIN:
@@ -3608,10 +3608,12 @@ def render_daily_submission_counts():
         return
 
     st.caption(
-        "학생들이 날짜별로 오답을 몇 번 제출했는지와 실제 입력한 문제 수를 함께 보여줍니다."
+        "담당 선생님별로 학생이 날짜마다 몇 문제를 제출했는지 확인하고, "
+        "학생·날짜를 선택하면 실제 제출한 문제번호까지 볼 수 있습니다."
     )
 
     df = get_all_wrong_answers()
+    roster = get_roster_df()
 
     if df.empty:
         st.info("집계할 오답 기록이 없습니다.")
@@ -3633,6 +3635,92 @@ def render_daily_submission_counts():
         lambda value: len(parse_problem_numbers(value))
     )
 
+    # 학생명 + 개별 교재 기준으로 담당 선생님과 반을 붙입니다.
+    # 한 명단 셀에 교재가 여러 개 들어간 경우에도 개별 교재로 나눠 매칭합니다.
+    roster_rows = []
+
+    if not roster.empty:
+        for _, row in roster.iterrows():
+            student_name = str(row.get("학생명", "") or "").strip()
+            teacher_name = normalize_teacher_name(
+                row.get("담당선생님", "")
+            )
+            class_name = str(row.get("반명", "") or "").strip()
+
+            for roster_book in split_roster_books(
+                row.get("매칭교재", "")
+            ):
+                roster_rows.append(
+                    {
+                        "학생": student_name,
+                        "교재": roster_book,
+                        "담당선생님": teacher_name,
+                        "반명": class_name,
+                    }
+                )
+
+    if roster_rows:
+        roster_lookup = pd.DataFrame(roster_rows).drop_duplicates(
+            subset=["학생", "교재", "담당선생님", "반명"]
+        )
+
+        working = working.merge(
+            roster_lookup,
+            on=["학생", "교재"],
+            how="left",
+        )
+    else:
+        working["담당선생님"] = ""
+        working["반명"] = ""
+
+    working["담당선생님"] = (
+        working["담당선생님"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+    working["반명"] = (
+        working["반명"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+    )
+
+    # 교재 기준으로 명단 매칭이 안 된 기록은 학생명이 한 선생님에게만
+    # 등록되어 있을 때 그 선생님으로 보완합니다.
+    if not roster.empty:
+        student_teacher_map = (
+            roster.assign(
+                담당선생님=roster["담당선생님"].apply(
+                    normalize_teacher_name
+                )
+            )
+            .groupby("학생명")["담당선생님"]
+            .agg(
+                lambda values: list(
+                    dict.fromkeys(
+                        str(value).strip()
+                        for value in values
+                        if str(value).strip()
+                    )
+                )
+            )
+            .to_dict()
+        )
+
+        unmatched_mask = working["담당선생님"] == ""
+
+        for idx in working.index[unmatched_mask]:
+            student_name = str(working.at[idx, "학생"]).strip()
+            teachers = student_teacher_map.get(student_name, [])
+            if len(teachers) == 1:
+                working.at[idx, "담당선생님"] = teachers[0]
+
+    working.loc[
+        working["담당선생님"] == "",
+        "담당선생님",
+    ] = "명단 미매칭"
+
     min_date = working["날짜"].min()
     max_date = working["날짜"].max()
     default_start = max(
@@ -3640,9 +3728,24 @@ def render_daily_submission_counts():
         max_date - timedelta(days=13),
     )
 
+    teacher_options = ["전체"] + sorted(
+        working["담당선생님"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
     filter_col1, filter_col2, filter_col3 = st.columns(3)
 
     with filter_col1:
+        selected_teacher = st.selectbox(
+            "담당 선생님",
+            teacher_options,
+            key="daily_submission_teacher_filter",
+        )
+
+    with filter_col2:
         start_date = st.date_input(
             "시작 날짜",
             value=default_start,
@@ -3651,28 +3754,13 @@ def render_daily_submission_counts():
             key="daily_submission_start_date",
         )
 
-    with filter_col2:
+    with filter_col3:
         end_date = st.date_input(
             "종료 날짜",
             value=max_date,
             min_value=min_date,
             max_value=max_date,
             key="daily_submission_end_date",
-        )
-
-    student_options = ["전체"] + sorted(
-        working["학생"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
-
-    with filter_col3:
-        student_filter = st.selectbox(
-            "학생 필터",
-            student_options,
-            key="daily_submission_student_filter",
         )
 
     if start_date > end_date:
@@ -3684,113 +3772,55 @@ def render_daily_submission_counts():
         & (working["날짜"] <= end_date)
     ].copy()
 
-    if student_filter != "전체":
+    if selected_teacher != "전체":
         filtered = filtered[
-            filtered["학생"].astype(str) == student_filter
+            filtered["담당선생님"] == selected_teacher
+        ].copy()
+
+    class_options = ["전체"] + sorted(
+        filtered["반명"]
+        .replace("", pd.NA)
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+    selected_class = st.selectbox(
+        "반 필터",
+        class_options,
+        key="daily_submission_class_filter",
+    )
+
+    if selected_class != "전체":
+        filtered = filtered[
+            filtered["반명"] == selected_class
         ].copy()
 
     if filtered.empty:
-        st.info("선택한 기간에 제출 기록이 없습니다.")
+        st.info("선택한 조건에 제출 기록이 없습니다.")
         return
 
+    # 핵심 화면: 학생 × 날짜별 실제 제출 문제 수
     student_daily = (
         filtered.groupby(
-            ["날짜", "학생", "학년"],
+            ["담당선생님", "반명", "학생", "날짜"],
             dropna=False,
             sort=False,
-        )
-        .agg(
-            제출건수=("학생", "size"),
-            문제수=("문제수", "sum"),
-            교재수=("교재", "nunique"),
-            최근제출=("작성일시_dt", "max"),
-        )
+        )["문제수"]
+        .sum()
         .reset_index()
     )
 
-    student_daily["최근제출"] = student_daily["최근제출"].dt.strftime(
-        "%Y-%m-%d %H:%M"
-    )
-
-    student_daily = student_daily.sort_values(
-        by=["날짜", "문제수", "학생"],
-        ascending=[False, False, True],
-    ).reset_index(drop=True)
-
-    daily_total = (
-        filtered.groupby("날짜", sort=False)
-        .agg(
-            제출학생수=("학생", "nunique"),
-            제출건수=("학생", "size"),
-            문제수=("문제수", "sum"),
+    if selected_teacher == "전체":
+        matrix = student_daily.pivot_table(
+            index=["담당선생님", "학생"],
+            columns="날짜",
+            values="문제수",
+            aggfunc="sum",
+            fill_value=0,
         )
-        .reset_index()
-        .sort_values("날짜", ascending=False)
-        .reset_index(drop=True)
-    )
-
-    metric1, metric2, metric3 = st.columns(3)
-    metric1.metric("제출 학생", filtered["학생"].nunique())
-    metric2.metric("제출 건수", len(filtered))
-    metric3.metric("입력 문제 수", int(filtered["문제수"].sum()))
-
-    detail_tab, total_tab, matrix_tab = st.tabs(
-        ["👤 학생별 날짜", "📅 날짜별 총합", "🗓️ 학생 × 날짜"]
-    )
-
-    with detail_tab:
-        st.dataframe(
-            student_daily,
-            use_container_width=True,
-            hide_index=True,
-            height=560,
-            column_config={
-                "날짜": st.column_config.DateColumn(
-                    "날짜",
-                    format="YYYY-MM-DD",
-                ),
-                "제출건수": st.column_config.NumberColumn(
-                    "제출건수",
-                    format="%d",
-                    help="Supabase에 저장된 제출 행 수입니다.",
-                ),
-                "문제수": st.column_config.NumberColumn(
-                    "문제수",
-                    format="%d",
-                    help="학생이 입력한 문제번호 개수의 합입니다.",
-                ),
-            },
-        )
-
-        st.download_button(
-            "학생별 날짜 제출량 엑셀 다운로드",
-            data=dataframe_to_excel_bytes(student_daily),
-            file_name=(
-                f"전체관리자_{start_date.strftime('%Y%m%d')}_"
-                f"{end_date.strftime('%Y%m%d')}_날짜별제출량.xlsx"
-            ),
-            mime=(
-                "application/vnd.openxmlformats-officedocument."
-                "spreadsheetml.sheet"
-            ),
-            key="download_daily_submission_detail",
-        )
-
-    with total_tab:
-        st.dataframe(
-            daily_total,
-            use_container_width=True,
-            hide_index=True,
-            height=520,
-            column_config={
-                "날짜": st.column_config.DateColumn(
-                    "날짜",
-                    format="YYYY-MM-DD",
-                ),
-            },
-        )
-
-    with matrix_tab:
+    else:
         matrix = student_daily.pivot_table(
             index="학생",
             columns="날짜",
@@ -3799,23 +3829,162 @@ def render_daily_submission_counts():
             fill_value=0,
         )
 
-        matrix = matrix.reindex(
-            sorted(matrix.columns, reverse=True),
-            axis=1,
-        )
-        matrix.columns = [
-            column.strftime("%m/%d")
-            if hasattr(column, "strftime")
-            else str(column)
-            for column in matrix.columns
-        ]
+    matrix = matrix.reindex(
+        sorted(matrix.columns, reverse=True),
+        axis=1,
+    )
+    matrix.columns = [
+        column.strftime("%m/%d")
+        if hasattr(column, "strftime")
+        else str(column)
+        for column in matrix.columns
+    ]
 
-        st.caption("각 칸은 해당 학생이 그날 입력한 오답 문제 수입니다.")
-        st.dataframe(
-            matrix,
-            use_container_width=True,
-            height=560,
+    st.markdown("### 📊 학생별 날짜 제출 문제 수")
+    st.caption(
+        "표의 숫자는 해당 학생이 그날 제출한 실제 오답 문제 개수입니다."
+    )
+    st.dataframe(
+        matrix,
+        use_container_width=True,
+        height=620,
+    )
+
+    st.divider()
+    st.markdown("### 🔎 자세한 문제번호 보기")
+    st.caption(
+        "선생님 → 학생 → 날짜를 선택하면 그날 제출한 교재와 문제번호를 확인할 수 있습니다."
+    )
+
+    detail_teacher_options = sorted(
+        filtered["담당선생님"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+    if selected_teacher != "전체":
+        detail_teacher = selected_teacher
+        st.markdown(f"**담당 선생님:** {detail_teacher}")
+    else:
+        detail_teacher = st.selectbox(
+            "자세히 볼 선생님",
+            detail_teacher_options,
+            key="daily_submission_detail_teacher",
         )
+
+    teacher_detail = filtered[
+        filtered["담당선생님"] == detail_teacher
+    ].copy()
+
+    detail_student_options = sorted(
+        teacher_detail["학생"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+    detail_col1, detail_col2 = st.columns(2)
+
+    with detail_col1:
+        detail_student = st.selectbox(
+            "학생 선택",
+            detail_student_options,
+            key="daily_submission_detail_student",
+        )
+
+    student_detail = teacher_detail[
+        teacher_detail["학생"] == detail_student
+    ].copy()
+
+    detail_date_options = sorted(
+        student_detail["날짜"].unique().tolist(),
+        reverse=True,
+    )
+
+    with detail_col2:
+        detail_date = st.selectbox(
+            "날짜 선택",
+            detail_date_options,
+            format_func=lambda value: (
+                value.strftime("%Y.%m.%d")
+                if hasattr(value, "strftime")
+                else str(value)
+            ),
+            key="daily_submission_detail_date",
+        )
+
+    selected_detail = student_detail[
+        student_detail["날짜"] == detail_date
+    ].copy()
+
+    detail_records = []
+
+    for _, row in selected_detail.sort_values(
+        "작성일시_dt",
+        ascending=True,
+    ).iterrows():
+        original_problem = str(row.get("문제번호", "") or "")
+        display_problem = format_xpattern_display_numbers(
+            str(row.get("교재", "") or ""),
+            original_problem,
+        )
+        problem_count = len(
+            parse_problem_numbers(original_problem)
+        )
+
+        detail_records.append(
+            {
+                "교재": row.get("교재", ""),
+                "문제번호": display_problem,
+                "문제수": problem_count,
+                "제출시간": (
+                    row["작성일시_dt"].strftime("%H:%M")
+                    if pd.notna(row["작성일시_dt"])
+                    else ""
+                ),
+                "비고": row.get("비고", ""),
+            }
+        )
+
+    detail_df = pd.DataFrame(
+        detail_records,
+        columns=["교재", "문제번호", "문제수", "제출시간", "비고"],
+    )
+
+    total_problem_count = int(detail_df["문제수"].sum()) if not detail_df.empty else 0
+
+    st.success(
+        f"{detail_teacher} · {detail_student} · "
+        f"{detail_date.strftime('%Y.%m.%d')} → 총 {total_problem_count}문제"
+    )
+
+    st.dataframe(
+        detail_df,
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    export_df = student_daily.copy().sort_values(
+        by=["담당선생님", "학생", "날짜"],
+        ascending=[True, True, False],
+    )
+
+    st.download_button(
+        "선생님별 날짜 제출 현황 엑셀 다운로드",
+        data=dataframe_to_excel_bytes(export_df),
+        file_name=(
+            f"전체관리자_{start_date.strftime('%Y%m%d')}_"
+            f"{end_date.strftime('%Y%m%d')}_선생님별날짜제출현황.xlsx"
+        ),
+        mime=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+        key="download_daily_submission_by_teacher",
+    )
 
 
 def get_student_signup_status_df(
