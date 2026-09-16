@@ -3598,6 +3598,226 @@ def render_weekly_missing_students():
     )
 
 
+
+def render_daily_submission_counts():
+    """전체 관리자용 학생 날짜별 오답 제출 건수 화면입니다."""
+    current_teacher = st.session_state.teacher_name
+
+    if current_teacher != ALL_TEACHER_ADMIN:
+        st.info("날짜별 제출량은 전체 관리자에서만 확인할 수 있습니다.")
+        return
+
+    st.caption(
+        "학생들이 날짜별로 오답을 몇 번 제출했는지와 실제 입력한 문제 수를 함께 보여줍니다."
+    )
+
+    df = get_all_wrong_answers()
+
+    if df.empty:
+        st.info("집계할 오답 기록이 없습니다.")
+        return
+
+    working = df.copy()
+    working["작성일시_dt"] = pd.to_datetime(
+        working["작성일시"],
+        errors="coerce",
+    )
+    working = working[working["작성일시_dt"].notna()].copy()
+
+    if working.empty:
+        st.info("날짜를 확인할 수 있는 오답 기록이 없습니다.")
+        return
+
+    working["날짜"] = working["작성일시_dt"].dt.date
+    working["문제수"] = working["문제번호"].apply(
+        lambda value: len(parse_problem_numbers(value))
+    )
+
+    min_date = working["날짜"].min()
+    max_date = working["날짜"].max()
+    default_start = max(
+        min_date,
+        max_date - timedelta(days=13),
+    )
+
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+
+    with filter_col1:
+        start_date = st.date_input(
+            "시작 날짜",
+            value=default_start,
+            min_value=min_date,
+            max_value=max_date,
+            key="daily_submission_start_date",
+        )
+
+    with filter_col2:
+        end_date = st.date_input(
+            "종료 날짜",
+            value=max_date,
+            min_value=min_date,
+            max_value=max_date,
+            key="daily_submission_end_date",
+        )
+
+    student_options = ["전체"] + sorted(
+        working["학생"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+    with filter_col3:
+        student_filter = st.selectbox(
+            "학생 필터",
+            student_options,
+            key="daily_submission_student_filter",
+        )
+
+    if start_date > end_date:
+        st.warning("시작 날짜는 종료 날짜보다 늦을 수 없습니다.")
+        return
+
+    filtered = working[
+        (working["날짜"] >= start_date)
+        & (working["날짜"] <= end_date)
+    ].copy()
+
+    if student_filter != "전체":
+        filtered = filtered[
+            filtered["학생"].astype(str) == student_filter
+        ].copy()
+
+    if filtered.empty:
+        st.info("선택한 기간에 제출 기록이 없습니다.")
+        return
+
+    student_daily = (
+        filtered.groupby(
+            ["날짜", "학생", "학년"],
+            dropna=False,
+            sort=False,
+        )
+        .agg(
+            제출건수=("학생", "size"),
+            문제수=("문제수", "sum"),
+            교재수=("교재", "nunique"),
+            최근제출=("작성일시_dt", "max"),
+        )
+        .reset_index()
+    )
+
+    student_daily["최근제출"] = student_daily["최근제출"].dt.strftime(
+        "%Y-%m-%d %H:%M"
+    )
+
+    student_daily = student_daily.sort_values(
+        by=["날짜", "문제수", "학생"],
+        ascending=[False, False, True],
+    ).reset_index(drop=True)
+
+    daily_total = (
+        filtered.groupby("날짜", sort=False)
+        .agg(
+            제출학생수=("학생", "nunique"),
+            제출건수=("학생", "size"),
+            문제수=("문제수", "sum"),
+        )
+        .reset_index()
+        .sort_values("날짜", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    metric1, metric2, metric3 = st.columns(3)
+    metric1.metric("제출 학생", filtered["학생"].nunique())
+    metric2.metric("제출 건수", len(filtered))
+    metric3.metric("입력 문제 수", int(filtered["문제수"].sum()))
+
+    detail_tab, total_tab, matrix_tab = st.tabs(
+        ["👤 학생별 날짜", "📅 날짜별 총합", "🗓️ 학생 × 날짜"]
+    )
+
+    with detail_tab:
+        st.dataframe(
+            student_daily,
+            use_container_width=True,
+            hide_index=True,
+            height=560,
+            column_config={
+                "날짜": st.column_config.DateColumn(
+                    "날짜",
+                    format="YYYY-MM-DD",
+                ),
+                "제출건수": st.column_config.NumberColumn(
+                    "제출건수",
+                    format="%d",
+                    help="Supabase에 저장된 제출 행 수입니다.",
+                ),
+                "문제수": st.column_config.NumberColumn(
+                    "문제수",
+                    format="%d",
+                    help="학생이 입력한 문제번호 개수의 합입니다.",
+                ),
+            },
+        )
+
+        st.download_button(
+            "학생별 날짜 제출량 엑셀 다운로드",
+            data=dataframe_to_excel_bytes(student_daily),
+            file_name=(
+                f"전체관리자_{start_date.strftime('%Y%m%d')}_"
+                f"{end_date.strftime('%Y%m%d')}_날짜별제출량.xlsx"
+            ),
+            mime=(
+                "application/vnd.openxmlformats-officedocument."
+                "spreadsheetml.sheet"
+            ),
+            key="download_daily_submission_detail",
+        )
+
+    with total_tab:
+        st.dataframe(
+            daily_total,
+            use_container_width=True,
+            hide_index=True,
+            height=520,
+            column_config={
+                "날짜": st.column_config.DateColumn(
+                    "날짜",
+                    format="YYYY-MM-DD",
+                ),
+            },
+        )
+
+    with matrix_tab:
+        matrix = student_daily.pivot_table(
+            index="학생",
+            columns="날짜",
+            values="문제수",
+            aggfunc="sum",
+            fill_value=0,
+        )
+
+        matrix = matrix.reindex(
+            sorted(matrix.columns, reverse=True),
+            axis=1,
+        )
+        matrix.columns = [
+            column.strftime("%m/%d")
+            if hasattr(column, "strftime")
+            else str(column)
+            for column in matrix.columns
+        ]
+
+        st.caption("각 칸은 해당 학생이 그날 입력한 오답 문제 수입니다.")
+        st.dataframe(
+            matrix,
+            use_container_width=True,
+            height=560,
+        )
+
+
 def get_student_signup_status_df(
     current_teacher: str,
 ) -> pd.DataFrame:
@@ -8009,6 +8229,7 @@ def show_admin():
     (
         tab_answers,
         tab_weekly_submission,
+        tab_daily_submission,
         tab_school_exam,
         tab_weekly_missing,
         tab_signup_status,
@@ -8019,6 +8240,7 @@ def show_admin():
         [
             "📋 전체 오답 현황",
             "📅 주간 제출 현황",
+            "📆 날짜별 제출량",
             "🏫 학교 기출 오답 현황",
             "🚨 미제출 학생 보기",
             "👤 가입 현황",
@@ -8176,6 +8398,9 @@ def show_admin():
 
     with tab_weekly_submission:
         render_weekly_submission_status()
+
+    with tab_daily_submission:
+        render_daily_submission_counts()
 
     with tab_school_exam:
         render_teacher_school_exam_management()
