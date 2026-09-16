@@ -3987,6 +3987,251 @@ def render_daily_submission_counts():
     )
 
 
+
+def render_student_detail_view():
+    """선생님 관리 화면에서 학생 한 명의 정보를 한 화면에 모아 보여줍니다."""
+    current_teacher = st.session_state.teacher_name
+    roster = get_roster_df()
+
+    if roster.empty:
+        st.info("등록된 학생 명단이 없습니다.")
+        return
+
+    if current_teacher == ALL_TEACHER_ADMIN:
+        allowed_roster = roster.copy()
+    else:
+        allowed_roster = roster[
+            roster["담당선생님"].apply(normalize_teacher_name)
+            == normalize_teacher_name(current_teacher)
+        ].copy()
+
+    if allowed_roster.empty:
+        st.info("현재 선생님에게 등록된 학생이 없습니다.")
+        return
+
+    student_options = sorted(
+        allowed_roster["학생명"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .unique()
+        .tolist()
+    )
+
+    selected_student = st.selectbox(
+        "학생 선택",
+        student_options,
+        key="teacher_student_detail_student",
+    )
+
+    student_roster = allowed_roster[
+        allowed_roster["학생명"].astype(str).str.strip()
+        == selected_student
+    ].copy()
+
+    school_names = ", ".join(
+        dict.fromkeys(
+            str(value).strip()
+            for value in student_roster["학교명"].fillna("")
+            if str(value).strip()
+        )
+    )
+    grades = ", ".join(
+        dict.fromkeys(
+            str(value).strip()
+            for value in student_roster["학년"].fillna("")
+            if str(value).strip()
+        )
+    )
+    teachers = ", ".join(
+        dict.fromkeys(
+            normalize_teacher_name(value)
+            for value in student_roster["담당선생님"].fillna("")
+            if str(value).strip()
+        )
+    )
+    classes = ", ".join(
+        dict.fromkeys(
+            str(value).strip()
+            for value in student_roster["반명"].fillna("")
+            if str(value).strip()
+        )
+    )
+
+    books = []
+    for value in student_roster["매칭교재"].fillna(""):
+        for book in split_roster_books(value):
+            if book not in books:
+                books.append(book)
+
+    all_answers = get_all_wrong_answers()
+    if all_answers.empty:
+        answer_df = pd.DataFrame(
+            columns=["학생", "학년", "교재", "문제번호", "비고", "작성일시"]
+        )
+    else:
+        answer_df = all_answers[
+            all_answers["학생"].astype(str).str.strip()
+            == selected_student
+        ].copy()
+
+        if current_teacher != ALL_TEACHER_ADMIN and books:
+            answer_df = answer_df[
+                answer_df["교재"].astype(str).isin(books)
+            ].copy()
+
+    total_records = len(answer_df)
+    total_questions = 0
+    last_submit = "-"
+
+    if not answer_df.empty:
+        total_questions = int(
+            answer_df["문제번호"]
+            .apply(lambda value: len(parse_problem_numbers(value)))
+            .sum()
+        )
+
+        parsed_times = pd.to_datetime(
+            answer_df["작성일시"],
+            errors="coerce",
+        )
+        if parsed_times.notna().any():
+            last_submit = parsed_times.max().strftime("%Y.%m.%d %H:%M")
+
+    users_df = get_all_users()
+    account_status = "미가입"
+    if not users_df.empty:
+        exact_user = users_df[
+            users_df["학생"].astype(str).str.strip()
+            == selected_student
+        ]
+        if not exact_user.empty:
+            account_status = "가입 완료"
+
+    st.markdown(f"### 👤 {selected_student}")
+    st.caption(
+        "학생의 소속, 교재, 가입 상태, 오답 활동을 한 화면에서 확인합니다."
+    )
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("가입 상태", account_status)
+    col2.metric("오답 기록", total_records)
+    col3.metric("누적 문제 수", total_questions)
+    col4.metric("최근 제출", last_submit)
+
+    info_col1, info_col2 = st.columns(2)
+
+    with info_col1:
+        st.markdown("#### 기본 정보")
+        st.write(f"**학교:** {school_names or '-'}")
+        st.write(f"**학년:** {grades or '-'}")
+        st.write(f"**담당 선생님:** {teachers or '-'}")
+        st.write(f"**소속 반:** {classes or '-'}")
+
+    with info_col2:
+        st.markdown("#### 등록 교재")
+        if books:
+            for book in books:
+                st.write(f"- {book}")
+        else:
+            st.write("- 등록된 교재 없음")
+
+    st.divider()
+
+    activity_tab, daily_tab, class_tab = st.tabs(
+        ["📝 최근 오답", "📆 날짜별 활동", "🏫 수강 정보"]
+    )
+
+    with activity_tab:
+        if answer_df.empty:
+            st.info("이 학생의 오답 기록이 없습니다.")
+        else:
+            recent_df = answer_df.copy()
+            recent_df["_작성일시_dt"] = pd.to_datetime(
+                recent_df["작성일시"],
+                errors="coerce",
+            )
+            recent_df = recent_df.sort_values(
+                "_작성일시_dt",
+                ascending=False,
+            ).drop(columns=["_작성일시_dt"])
+
+            recent_df["문제번호"] = recent_df.apply(
+                lambda row: format_xpattern_display_numbers(
+                    row["교재"],
+                    row["문제번호"],
+                ),
+                axis=1,
+            )
+
+            st.dataframe(
+                recent_df[
+                    ["작성일시", "교재", "문제번호", "비고"]
+                ].head(30),
+                use_container_width=True,
+                hide_index=True,
+                height=460,
+            )
+
+    with daily_tab:
+        if answer_df.empty:
+            st.info("날짜별로 집계할 기록이 없습니다.")
+        else:
+            daily_df = answer_df.copy()
+            daily_df["_작성일시_dt"] = pd.to_datetime(
+                daily_df["작성일시"],
+                errors="coerce",
+            )
+            daily_df = daily_df[
+                daily_df["_작성일시_dt"].notna()
+            ].copy()
+            daily_df["날짜"] = daily_df["_작성일시_dt"].dt.date
+            daily_df["문제수"] = daily_df["문제번호"].apply(
+                lambda value: len(parse_problem_numbers(value))
+            )
+
+            summary_df = (
+                daily_df.groupby("날짜", sort=False)
+                .agg(
+                    문제수=("문제수", "sum"),
+                    제출횟수=("학생", "size"),
+                    교재수=("교재", "nunique"),
+                )
+                .reset_index()
+                .sort_values("날짜", ascending=False)
+            )
+
+            st.dataframe(
+                summary_df,
+                use_container_width=True,
+                hide_index=True,
+                height=420,
+                column_config={
+                    "날짜": st.column_config.DateColumn(
+                        "날짜",
+                        format="YYYY-MM-DD",
+                    )
+                },
+            )
+
+    with class_tab:
+        display_roster = student_roster[
+            [
+                "담당선생님",
+                "반명",
+                "학교명",
+                "학년",
+                "매칭교재",
+            ]
+        ].drop_duplicates()
+
+        st.dataframe(
+            display_roster,
+            use_container_width=True,
+            hide_index=True,
+        )
+
+
 def get_student_signup_status_df(
     current_teacher: str,
 ) -> pd.DataFrame:
@@ -8396,28 +8641,60 @@ def show_admin():
     st.caption(f"현재 로그인: {st.session_state.teacher_name or '선생님 미지정'}")
 
     (
-        tab_answers,
-        tab_weekly_submission,
-        tab_daily_submission,
-        tab_school_exam,
-        tab_weekly_missing,
-        tab_signup_status,
-        tab_teacher_students,
-        tab_paper,
-        tab_print,
+        tab_student_group,
+        tab_wrong_group,
+        tab_output_group,
     ) = st.tabs(
         [
-            "📋 전체 오답 현황",
-            "📅 주간 제출 현황",
-            "📆 날짜별 제출량",
-            "🏫 학교 기출 오답 현황",
-            "🚨 미제출 학생 보기",
-            "👤 가입 현황",
-            "🏫 내 반 학생",
-            "🧾 오답노트 만들기",
-            "🖨️ 출력 관리",
+            "👥 학생 관리",
+            "📝 오답 관리",
+            "🖨️ 오답노트 · 출력",
         ]
     )
+
+    with tab_student_group:
+        (
+            tab_student_detail,
+            tab_signup_status,
+            tab_teacher_students,
+        ) = st.tabs(
+            [
+                "👤 학생 상세",
+                "🔐 가입 현황",
+                "🏫 반 학생",
+            ]
+        )
+
+    with tab_wrong_group:
+        (
+            tab_answers,
+            tab_weekly_submission,
+            tab_daily_submission,
+            tab_school_exam,
+            tab_weekly_missing,
+        ) = st.tabs(
+            [
+                "📋 전체 오답",
+                "📅 주간 제출",
+                "📆 날짜별 제출량",
+                "🏫 학교 기출",
+                "🚨 미제출",
+            ]
+        )
+
+    with tab_output_group:
+        (
+            tab_paper,
+            tab_print,
+        ) = st.tabs(
+            [
+                "🧾 오답노트 만들기",
+                "🖨️ 출력 관리",
+            ]
+        )
+
+    with tab_student_detail:
+        render_student_detail_view()
 
     with tab_answers:
         df = get_all_wrong_answers()
