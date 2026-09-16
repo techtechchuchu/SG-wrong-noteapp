@@ -282,14 +282,14 @@ except Exception:
     SUPERADMIN_PASSWORD = None
 
 try:
-    OPENAI_API_KEY = str(st.secrets["OPENAI_API_KEY"]).strip()
+    ANTHROPIC_API_KEY = str(st.secrets["ANTHROPIC_API_KEY"]).strip()
 except Exception:
-    OPENAI_API_KEY = ""
+    ANTHROPIC_API_KEY = ""
 
 try:
-    SG_AI_MODEL = str(st.secrets["OPENAI_MODEL"]).strip()
+    SG_AI_MODEL = str(st.secrets["ANTHROPIC_MODEL"]).strip()
 except Exception:
-    SG_AI_MODEL = "gpt-5.6-luna"
+    SG_AI_MODEL = "claude-sonnet-5"
 
 
 
@@ -4509,20 +4509,83 @@ def build_student_counselor_context(
     return "\n".join(lines)
 
 
+def call_claude_message(
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int = 700,
+) -> str:
+    """Anthropic Messages API를 호출해 Claude 응답 텍스트를 반환합니다."""
+    if not ANTHROPIC_API_KEY:
+        return (
+            "AI 기능을 사용하려면 Streamlit Secrets에 "
+            "ANTHROPIC_API_KEY를 등록해주세요."
+        )
+
+    payload = json.dumps(
+        {
+            "model": SG_AI_MODEL,
+            "max_tokens": int(max_tokens),
+            "system": system_prompt.strip(),
+            "messages": [
+                {
+                    "role": "user",
+                    "content": user_prompt,
+                }
+            ],
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    request = urllib.request.Request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "x-api-key": ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        text_parts = []
+        for item in data.get("content", []):
+            if item.get("type") == "text":
+                text_value = str(item.get("text", "") or "").strip()
+                if text_value:
+                    text_parts.append(text_value)
+
+        return (
+            "\n".join(text_parts).strip()
+            or "답변을 만들지 못했습니다. 잠시 후 다시 시도해주세요."
+        )
+
+    except urllib.error.HTTPError as error:
+        try:
+            error_body = error.read().decode("utf-8")
+        except Exception:
+            error_body = ""
+
+        return (
+            "Claude API 연결 중 오류가 발생했습니다. "
+            f"API 키·결제 상태·모델 설정을 확인해주세요. ({error.code})"
+            + (f"\n{error_body[:300]}" if error_body else "")
+        )
+    except Exception:
+        return "Claude API 연결 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+
+
 def call_sg_ai_counselor(
     student_context: str,
     user_message: str,
     conversation: list[dict],
 ) -> str:
-    """OpenAI Responses API를 이용해 SG AI 상담사 답변을 생성합니다."""
+    """Claude를 이용해 선생님용 SG AI 상담사 답변을 생성합니다."""
     if is_unclear_counselor_message(user_message):
         return "제가 잘 이해하지 못했어요. 조금 더 구체적으로 말씀해 주세요."
-
-    if not OPENAI_API_KEY:
-        return (
-            "SG AI 상담사를 사용하려면 Streamlit Secrets에 "
-            "OPENAI_API_KEY를 등록해주세요."
-        )
 
     history_text = ""
     for message in conversation[-8:]:
@@ -4531,7 +4594,7 @@ def call_sg_ai_counselor(
         if content:
             history_text += f"{role}: {content}\n"
 
-    instructions = """
+    system_prompt = """
 너는 수학학원 선생님을 보조하는 'SG AI 상담사'다.
 학생을 직접 진단하거나 단정하지 말고, 제공된 학습 데이터에서 확인되는 사실만 바탕으로 답한다.
 학생의 성격, 가정환경, 정신건강, 의지나 태도를 근거 없이 추측하지 않는다.
@@ -4542,64 +4605,18 @@ def call_sg_ai_counselor(
 학생 개인정보는 답변에 불필요하게 반복하지 않는다.
 """
 
-    input_text = (
+    user_prompt = (
         "아래 학생 학습 데이터와 이전 대화를 참고해서 선생님의 질문에 답해줘.\n\n"
         f"[학생 학습 데이터]\n{student_context}\n\n"
         f"[최근 대화]\n{history_text or '없음'}\n"
         f"선생님: {user_message}"
     )
 
-    payload = json.dumps(
-        {
-            "model": SG_AI_MODEL,
-            "instructions": instructions.strip(),
-            "input": input_text,
-            "max_output_tokens": 700,
-        }
-    ).encode("utf-8")
-
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+    return call_claude_message(
+        system_prompt,
+        user_prompt,
+        max_tokens=700,
     )
-
-    try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            data = json.loads(response.read().decode("utf-8"))
-
-        output_text = str(data.get("output_text", "") or "").strip()
-
-        if not output_text:
-            for output_item in data.get("output", []):
-                if output_item.get("type") != "message":
-                    continue
-                for content_item in output_item.get("content", []):
-                    if content_item.get("type") == "output_text":
-                        output_text += str(content_item.get("text", "") or "")
-
-        return (
-            output_text.strip()
-            or "답변을 만들지 못했습니다. 잠시 후 다시 시도해주세요."
-        )
-
-    except urllib.error.HTTPError as error:
-        try:
-            error_body = error.read().decode("utf-8")
-        except Exception:
-            error_body = ""
-        return (
-            "SG AI 상담사 연결 중 오류가 발생했습니다. "
-            f"API 상태를 확인해주세요. ({error.code})"
-            + (f"\n{error_body[:300]}" if error_body else "")
-        )
-    except Exception:
-        return "SG AI 상담사 연결 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
-
 
 
 def call_sg_ai_student_counselor(
@@ -4607,24 +4624,29 @@ def call_sg_ai_student_counselor(
     user_message: str,
     conversation: list[dict],
 ) -> str:
-    """학생용 SG 고등관 AI 학습 상담사 수잔 답변을 생성합니다."""
+    """Claude를 이용해 학생용 SG 고등관 AI 학습 상담사 수잔 답변을 생성합니다."""
     if is_unclear_counselor_message(user_message):
         return "제가 잘 이해하지 못했어요. 조금 더 구체적으로 말씀해 주세요."
 
-    if not OPENAI_API_KEY:
+    if not ANTHROPIC_API_KEY:
         return (
-            "SG 고등관 AI 학습 상담사 수잔를 사용하려면 관리자에게 AI 기능 설정을 요청해주세요."
+            "SG 고등관 AI 학습 상담사 수잔을 사용하려면 "
+            "관리자에게 AI 기능 설정을 요청해주세요."
         )
 
     history_text = ""
     for message in conversation[-8:]:
-        role = "학생" if message.get("role") == "user" else "SG 고등관 AI 학습 상담사 수잔"
+        role = (
+            "학생"
+            if message.get("role") == "user"
+            else "SG 고등관 AI 학습 상담사 수잔"
+        )
         content = str(message.get("content", "")).strip()
         if content:
             history_text += f"{role}: {content}\n"
 
-    instructions = """
-너는 수학학원 학생을 돕는 'SG 고등관 AI 학습 상담사 수잔'다.
+    system_prompt = """
+너는 수학학원 학생을 돕는 'SG 고등관 AI 학습 상담사 수잔'이다.
 학생의 오답 제출 기록과 등록 교재를 참고하여 공부 방향과 복습 방법을 도와준다.
 정답만 대신 주기보다는 학생이 스스로 공부를 이어갈 수 있게 구체적으로 안내한다.
 학생의 성격, 가정환경, 정신건강, 의지나 태도를 근거 없이 추측하지 않는다.
@@ -4634,58 +4656,18 @@ def call_sg_ai_student_counselor(
 답변은 친절하고 짧게, 필요하면 3~5개 항목으로 정리한다.
 """
 
-    input_text = (
+    user_prompt = (
         "아래 학생의 학습 기록을 참고해서 질문에 답해줘.\n\n"
         f"[학생 학습 데이터]\n{student_context}\n\n"
         f"[최근 대화]\n{history_text or '없음'}\n"
         f"학생: {user_message}"
     )
 
-    payload = json.dumps(
-        {
-            "model": SG_AI_MODEL,
-            "instructions": instructions.strip(),
-            "input": input_text,
-            "max_output_tokens": 600,
-        }
-    ).encode("utf-8")
-
-    request = urllib.request.Request(
-        "https://api.openai.com/v1/responses",
-        data=payload,
-        headers={
-            "Authorization": f"Bearer {OPENAI_API_KEY}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+    return call_claude_message(
+        system_prompt,
+        user_prompt,
+        max_tokens=600,
     )
-
-    try:
-        with urllib.request.urlopen(request, timeout=45) as response:
-            data = json.loads(response.read().decode("utf-8"))
-
-        output_text = str(data.get("output_text", "") or "").strip()
-
-        if not output_text:
-            for output_item in data.get("output", []):
-                if output_item.get("type") != "message":
-                    continue
-                for content_item in output_item.get("content", []):
-                    if content_item.get("type") == "output_text":
-                        output_text += str(content_item.get("text", "") or "")
-
-        return (
-            output_text.strip()
-            or "답변을 만들지 못했습니다. 잠시 후 다시 시도해주세요."
-        )
-
-    except urllib.error.HTTPError as error:
-        return (
-            "SG 고등관 AI 학습 상담사 수잔 연결 중 오류가 발생했습니다. "
-            f"관리자에게 문의해주세요. ({error.code})"
-        )
-    except Exception:
-        return "SG 고등관 AI 학습 상담사 수잔 연결 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
 
 
 def render_student_sg_ai_counselor(student_name: str):
