@@ -3,6 +3,9 @@ import base64
 import re
 import hashlib
 import html
+import json
+import urllib.request
+import urllib.error
 from collections import Counter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -277,6 +280,16 @@ try:
     SUPERADMIN_PASSWORD = st.secrets["SUPERADMIN_PASSWORD"]
 except Exception:
     SUPERADMIN_PASSWORD = None
+
+try:
+    OPENAI_API_KEY = str(st.secrets["OPENAI_API_KEY"]).strip()
+except Exception:
+    OPENAI_API_KEY = ""
+
+try:
+    SG_AI_MODEL = str(st.secrets["OPENAI_MODEL"]).strip()
+except Exception:
+    SG_AI_MODEL = "gpt-5.6-luna"
 
 
 
@@ -4366,6 +4379,339 @@ def render_teacher_wrong_answer_dashboard():
                 )
 
 
+
+def is_unclear_counselor_message(message: str) -> bool:
+    """명백한 무의미 입력은 AI 호출 전에 짧게 안내합니다."""
+    text = str(message or "").strip()
+
+    if len(text) < 2:
+        return True
+
+    meaningful = re.findall(r"[가-힣A-Za-z0-9]", text)
+    jamo = re.findall(r"[ㄱ-ㅎㅏ-ㅣ]", text)
+
+    # 'ㅇㄴㄹㄴㅇㄹ'처럼 자모만 나열된 입력
+    if not meaningful and jamo:
+        return True
+
+    # 문자·숫자 없이 기호만 입력한 경우
+    if not meaningful and not jamo:
+        return True
+
+    return False
+
+
+def build_student_counselor_context(
+    student_name: str,
+    student_roster: pd.DataFrame,
+    answer_df: pd.DataFrame,
+) -> str:
+    """AI 상담사에 전달할 최소 학습 컨텍스트를 구성합니다."""
+    school_names = ", ".join(
+        dict.fromkeys(
+            str(value).strip()
+            for value in student_roster["학교명"].fillna("")
+            if str(value).strip()
+        )
+    )
+    grades = ", ".join(
+        dict.fromkeys(
+            str(value).strip()
+            for value in student_roster["학년"].fillna("")
+            if str(value).strip()
+        )
+    )
+    classes = ", ".join(
+        dict.fromkeys(
+            str(value).strip()
+            for value in student_roster["반명"].fillna("")
+            if str(value).strip()
+        )
+    )
+
+    books = []
+    for value in student_roster["매칭교재"].fillna(""):
+        for book in split_roster_books(value):
+            if book not in books:
+                books.append(book)
+
+    lines = [
+        f"학생: {student_name}",
+        f"학교: {school_names or '미등록'}",
+        f"학년: {grades or '미등록'}",
+        f"소속 반: {classes or '미등록'}",
+        f"등록 교재: {', '.join(books) if books else '없음'}",
+    ]
+
+    if answer_df.empty:
+        lines.append("오답 제출 기록: 없음")
+        return "\n".join(lines)
+
+    working = answer_df.copy()
+    working["_dt"] = pd.to_datetime(
+        working["작성일시"],
+        errors="coerce",
+    )
+    working = working[working["_dt"].notna()].copy()
+
+    if working.empty:
+        lines.append("오답 제출 기록: 날짜 확인 가능한 기록 없음")
+        return "\n".join(lines)
+
+    working["_date"] = working["_dt"].dt.date
+    working["_count"] = working["문제번호"].apply(
+        lambda value: len(parse_problem_numbers(value))
+    )
+
+    today = datetime.now(KST).date()
+    recent_start = today - timedelta(days=13)
+    recent = working[working["_date"] >= recent_start].copy()
+
+    lines.append(
+        f"누적 오답 문제 수: {int(working['_count'].sum())}"
+    )
+    lines.append(
+        f"최근 제출: {working['_dt'].max().strftime('%Y-%m-%d %H:%M')}"
+    )
+    lines.append(
+        f"최근 14일 제출 문제 수: {int(recent['_count'].sum())}"
+    )
+    lines.append(
+        f"최근 14일 활동일 수: {recent['_date'].nunique()}"
+    )
+
+    by_book = (
+        recent.groupby("교재")["_count"]
+        .sum()
+        .sort_values(ascending=False)
+        .head(5)
+    )
+    if not by_book.empty:
+        book_text = ", ".join(
+            f"{book} {int(count)}문제"
+            for book, count in by_book.items()
+        )
+        lines.append(f"최근 14일 교재별 제출: {book_text}")
+
+    recent_days = (
+        recent.groupby("_date")["_count"]
+        .sum()
+        .sort_index(ascending=False)
+        .head(7)
+    )
+    if not recent_days.empty:
+        day_text = ", ".join(
+            f"{day.strftime('%m/%d')} {int(count)}문제"
+            for day, count in recent_days.items()
+        )
+        lines.append(f"최근 활동: {day_text}")
+
+    return "\n".join(lines)
+
+
+def call_sg_ai_counselor(
+    student_context: str,
+    user_message: str,
+    conversation: list[dict],
+) -> str:
+    """OpenAI Responses API를 이용해 SG AI 상담사 답변을 생성합니다."""
+    if is_unclear_counselor_message(user_message):
+        return "제가 잘 이해하지 못했어요. 조금 더 구체적으로 말씀해 주세요."
+
+    if not OPENAI_API_KEY:
+        return (
+            "SG AI 상담사를 사용하려면 Streamlit Secrets에 "
+            "OPENAI_API_KEY를 등록해주세요."
+        )
+
+    history_text = ""
+    for message in conversation[-8:]:
+        role = "선생님" if message.get("role") == "user" else "SG AI 상담사"
+        content = str(message.get("content", "")).strip()
+        if content:
+            history_text += f"{role}: {content}\n"
+
+    instructions = """
+너는 수학학원 선생님을 보조하는 'SG AI 상담사'다.
+학생을 직접 진단하거나 단정하지 말고, 제공된 학습 데이터에서 확인되는 사실만 바탕으로 답한다.
+학생의 성격, 가정환경, 정신건강, 의지나 태도를 근거 없이 추측하지 않는다.
+상담에 바로 쓸 수 있도록 짧고 실무적으로 답한다.
+필요하면 '관찰된 사실 / 상담에서 확인할 점 / 질문 예시 / 다음 확인사항' 순서로 정리한다.
+사용자의 말이 의미가 불분명하거나 문맥상 이해하기 어렵다면 추측하지 말고 반드시
+'제가 잘 이해하지 못했어요. 조금 더 구체적으로 말씀해 주세요.'라고 답한다.
+학생 개인정보는 답변에 불필요하게 반복하지 않는다.
+"""
+
+    input_text = (
+        "아래 학생 학습 데이터와 이전 대화를 참고해서 선생님의 질문에 답해줘.\n\n"
+        f"[학생 학습 데이터]\n{student_context}\n\n"
+        f"[최근 대화]\n{history_text or '없음'}\n"
+        f"선생님: {user_message}"
+    )
+
+    payload = json.dumps(
+        {
+            "model": SG_AI_MODEL,
+            "instructions": instructions.strip(),
+            "input": input_text,
+            "max_output_tokens": 700,
+        }
+    ).encode("utf-8")
+
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        output_text = str(data.get("output_text", "") or "").strip()
+
+        if not output_text:
+            for output_item in data.get("output", []):
+                if output_item.get("type") != "message":
+                    continue
+                for content_item in output_item.get("content", []):
+                    if content_item.get("type") == "output_text":
+                        output_text += str(content_item.get("text", "") or "")
+
+        return (
+            output_text.strip()
+            or "답변을 만들지 못했습니다. 잠시 후 다시 시도해주세요."
+        )
+
+    except urllib.error.HTTPError as error:
+        try:
+            error_body = error.read().decode("utf-8")
+        except Exception:
+            error_body = ""
+        return (
+            "SG AI 상담사 연결 중 오류가 발생했습니다. "
+            f"API 상태를 확인해주세요. ({error.code})"
+            + (f"\n{error_body[:300]}" if error_body else "")
+        )
+    except Exception:
+        return "SG AI 상담사 연결 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+
+
+def render_sg_ai_counselor(
+    selected_student: str,
+    student_roster: pd.DataFrame,
+    answer_df: pd.DataFrame,
+):
+    """학생 상세 화면의 SG AI 상담사 채팅 UI입니다."""
+    st.markdown("### 🤖 SG AI 상담사")
+    st.caption(
+        "학생의 오답 제출 기록을 바탕으로 상담 전 브리핑과 질문을 도와주는 선생님용 AI입니다."
+    )
+    st.info(
+        "AI 답변은 상담 참고자료입니다. 학생의 상황은 실제 대화를 통해 확인해주세요."
+    )
+
+    student_context = build_student_counselor_context(
+        selected_student,
+        student_roster,
+        answer_df,
+    )
+
+    context_key = f"sg_ai_counselor_messages_{selected_student}"
+
+    if context_key not in st.session_state:
+        st.session_state[context_key] = []
+
+    col1, col2, col3 = st.columns(3)
+
+    if col1.button(
+        "📋 상담 브리핑",
+        key=f"sg_ai_brief_{selected_student}",
+        use_container_width=True,
+    ):
+        prompt = (
+            "이 학생의 최근 학습 흐름을 상담 전에 빠르게 파악할 수 있게 "
+            "관찰된 사실과 상담에서 확인할 점을 정리해줘."
+        )
+        answer = call_sg_ai_counselor(
+            student_context,
+            prompt,
+            st.session_state[context_key],
+        )
+        st.session_state[context_key].extend(
+            [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": answer},
+            ]
+        )
+
+    if col2.button(
+        "💬 상담 질문 추천",
+        key=f"sg_ai_questions_{selected_student}",
+        use_container_width=True,
+    ):
+        prompt = (
+            "이 학생과 실제 상담할 때 부담 없이 물어볼 수 있는 질문을 "
+            "4개만 추천해줘. 학습 데이터에서 확인되지 않은 사정은 추측하지 마."
+        )
+        answer = call_sg_ai_counselor(
+            student_context,
+            prompt,
+            st.session_state[context_key],
+        )
+        st.session_state[context_key].extend(
+            [
+                {"role": "user", "content": prompt},
+                {"role": "assistant", "content": answer},
+            ]
+        )
+
+    if col3.button(
+        "🗑️ 대화 초기화",
+        key=f"sg_ai_clear_{selected_student}",
+        use_container_width=True,
+    ):
+        st.session_state[context_key] = []
+        st.rerun()
+
+    for message in st.session_state[context_key]:
+        with st.chat_message(
+            "assistant" if message["role"] == "assistant" else "user",
+            avatar="🤖" if message["role"] == "assistant" else None,
+        ):
+            st.write(message["content"])
+
+    user_message = st.chat_input(
+        f"{selected_student} 학생에 대해 SG AI 상담사에게 물어보세요",
+        key=f"sg_ai_chat_{selected_student}",
+    )
+
+    if user_message:
+        st.session_state[context_key].append(
+            {"role": "user", "content": user_message}
+        )
+
+        with st.chat_message("user"):
+            st.write(user_message)
+
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("SG AI 상담사가 학습 기록을 확인하고 있습니다..."):
+                answer = call_sg_ai_counselor(
+                    student_context,
+                    user_message,
+                    st.session_state[context_key][:-1],
+                )
+            st.write(answer)
+
+        st.session_state[context_key].append(
+            {"role": "assistant", "content": answer}
+        )
+
+
 def render_student_detail_view():
     """선생님 관리 화면에서 학생 한 명의 정보를 한 화면에 모아 보여줍니다."""
     current_teacher = st.session_state.teacher_name
@@ -4516,8 +4862,13 @@ def render_student_detail_view():
 
     st.divider()
 
-    activity_tab, daily_tab, class_tab = st.tabs(
-        ["📝 최근 오답", "📆 날짜별 활동", "🏫 수강 정보"]
+    activity_tab, daily_tab, class_tab, ai_counselor_tab = st.tabs(
+        [
+            "📝 최근 오답",
+            "📆 날짜별 활동",
+            "🏫 수강 정보",
+            "🤖 SG AI 상담사",
+        ]
     )
 
     with activity_tab:
@@ -4607,6 +4958,13 @@ def render_student_detail_view():
             display_roster,
             use_container_width=True,
             hide_index=True,
+        )
+
+    with ai_counselor_tab:
+        render_sg_ai_counselor(
+            selected_student,
+            student_roster,
+            answer_df,
         )
 
 
