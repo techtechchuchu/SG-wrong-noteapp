@@ -4601,6 +4601,214 @@ def call_sg_ai_counselor(
         return "SG AI 상담사 연결 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
 
 
+
+def call_sg_ai_student_counselor(
+    student_context: str,
+    user_message: str,
+    conversation: list[dict],
+) -> str:
+    """학생용 SG AI 상담사 답변을 생성합니다."""
+    if is_unclear_counselor_message(user_message):
+        return "제가 잘 이해하지 못했어요. 조금 더 구체적으로 말씀해 주세요."
+
+    if not OPENAI_API_KEY:
+        return (
+            "SG AI 상담사를 사용하려면 관리자에게 AI 기능 설정을 요청해주세요."
+        )
+
+    history_text = ""
+    for message in conversation[-8:]:
+        role = "학생" if message.get("role") == "user" else "SG AI 상담사"
+        content = str(message.get("content", "")).strip()
+        if content:
+            history_text += f"{role}: {content}\n"
+
+    instructions = """
+너는 수학학원 학생을 돕는 'SG AI 상담사'다.
+학생의 오답 제출 기록과 등록 교재를 참고하여 공부 방향과 복습 방법을 도와준다.
+정답만 대신 주기보다는 학생이 스스로 공부를 이어갈 수 있게 구체적으로 안내한다.
+학생의 성격, 가정환경, 정신건강, 의지나 태도를 근거 없이 추측하지 않는다.
+제공된 데이터에 없는 사실은 만들어내지 않는다.
+사용자의 말이 의미가 불분명하거나 문맥상 이해하기 어렵다면 추측하지 말고 반드시
+'제가 잘 이해하지 못했어요. 조금 더 구체적으로 말씀해 주세요.'라고 답한다.
+답변은 친절하고 짧게, 필요하면 3~5개 항목으로 정리한다.
+"""
+
+    input_text = (
+        "아래 학생의 학습 기록을 참고해서 질문에 답해줘.\n\n"
+        f"[학생 학습 데이터]\n{student_context}\n\n"
+        f"[최근 대화]\n{history_text or '없음'}\n"
+        f"학생: {user_message}"
+    )
+
+    payload = json.dumps(
+        {
+            "model": SG_AI_MODEL,
+            "instructions": instructions.strip(),
+            "input": input_text,
+            "max_output_tokens": 600,
+        }
+    ).encode("utf-8")
+
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/responses",
+        data=payload,
+        headers={
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        method="POST",
+    )
+
+    try:
+        with urllib.request.urlopen(request, timeout=45) as response:
+            data = json.loads(response.read().decode("utf-8"))
+
+        output_text = str(data.get("output_text", "") or "").strip()
+
+        if not output_text:
+            for output_item in data.get("output", []):
+                if output_item.get("type") != "message":
+                    continue
+                for content_item in output_item.get("content", []):
+                    if content_item.get("type") == "output_text":
+                        output_text += str(content_item.get("text", "") or "")
+
+        return (
+            output_text.strip()
+            or "답변을 만들지 못했습니다. 잠시 후 다시 시도해주세요."
+        )
+
+    except urllib.error.HTTPError as error:
+        return (
+            "SG AI 상담사 연결 중 오류가 발생했습니다. "
+            f"관리자에게 문의해주세요. ({error.code})"
+        )
+    except Exception:
+        return "SG AI 상담사 연결 중 오류가 발생했습니다. 잠시 후 다시 시도해주세요."
+
+
+def render_student_sg_ai_counselor(student_name: str):
+    """학생 로그인 화면에서 사용하는 SG AI 상담사 UI입니다."""
+    roster = get_roster_df()
+    if roster.empty:
+        student_roster = pd.DataFrame(
+            [{
+                "학생명": student_name,
+                "학교명": "",
+                "학년": "",
+                "반명": "",
+                "매칭교재": "",
+            }]
+        )
+    else:
+        student_roster = roster[
+            roster["학생명"].astype(str).str.strip() == student_name
+        ].copy()
+
+        if student_roster.empty:
+            student_roster = pd.DataFrame(
+                [{
+                    "학생명": student_name,
+                    "학교명": "",
+                    "학년": "",
+                    "반명": "",
+                    "매칭교재": "",
+                }]
+            )
+
+    answer_df = get_my_wrong_answers(student_name)
+    student_context = build_student_counselor_context(
+        student_name,
+        student_roster,
+        answer_df,
+    )
+
+    state_key = f"student_sg_ai_messages_{student_name}"
+    if state_key not in st.session_state:
+        st.session_state[state_key] = []
+
+    st.markdown("### 🤖 SG AI 상담사")
+    st.caption(
+        "내 오답 기록을 바탕으로 복습 방향과 공부 계획을 함께 정리해주는 AI 상담사입니다."
+    )
+
+    q1, q2, q3 = st.columns(3)
+
+    if q1.button(
+        "📌 오늘 뭐 공부하지?",
+        key=f"student_ai_today_{student_name}",
+        use_container_width=True,
+    ):
+        prompt = "내 최근 오답 기록을 보고 오늘 복습할 내용을 짧게 추천해줘."
+        answer = call_sg_ai_student_counselor(
+            student_context,
+            prompt,
+            st.session_state[state_key],
+        )
+        st.session_state[state_key].extend([
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": answer},
+        ])
+
+    if q2.button(
+        "📚 최근 학습 정리",
+        key=f"student_ai_summary_{student_name}",
+        use_container_width=True,
+    ):
+        prompt = "내 최근 학습 기록을 간단히 요약하고 다음에 무엇을 하면 좋을지 알려줘."
+        answer = call_sg_ai_student_counselor(
+            student_context,
+            prompt,
+            st.session_state[state_key],
+        )
+        st.session_state[state_key].extend([
+            {"role": "user", "content": prompt},
+            {"role": "assistant", "content": answer},
+        ])
+
+    if q3.button(
+        "🗑️ 대화 초기화",
+        key=f"student_ai_clear_{student_name}",
+        use_container_width=True,
+    ):
+        st.session_state[state_key] = []
+        st.rerun()
+
+    for message in st.session_state[state_key]:
+        with st.chat_message(
+            "assistant" if message["role"] == "assistant" else "user",
+            avatar="🤖" if message["role"] == "assistant" else None,
+        ):
+            st.write(message["content"])
+
+    user_message = st.chat_input(
+        "SG AI 상담사에게 질문해보세요",
+        key=f"student_ai_chat_{student_name}",
+    )
+
+    if user_message:
+        st.session_state[state_key].append(
+            {"role": "user", "content": user_message}
+        )
+
+        with st.chat_message("user"):
+            st.write(user_message)
+
+        with st.chat_message("assistant", avatar="🤖"):
+            with st.spinner("SG AI 상담사가 생각하고 있습니다..."):
+                answer = call_sg_ai_student_counselor(
+                    student_context,
+                    user_message,
+                    st.session_state[state_key][:-1],
+                )
+            st.write(answer)
+
+        st.session_state[state_key].append(
+            {"role": "assistant", "content": answer}
+        )
+
+
 def render_sg_ai_counselor(
     selected_student: str,
     student_roster: pd.DataFrame,
@@ -9236,6 +9444,13 @@ def show_student():
 
         with st.expander("🏫 학교 기출 오답 작성", expanded=True):
             render_student_school_exam_wrong_answer()
+
+        st.divider()
+
+        with st.expander("🤖 SG AI 상담사", expanded=False):
+            render_student_sg_ai_counselor(
+                st.session_state.student_user
+            )
 
         st.divider()
 
