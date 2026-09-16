@@ -3988,6 +3988,384 @@ def render_daily_submission_counts():
 
 
 
+
+def render_teacher_wrong_answer_dashboard():
+    """선생님이 반별 학생 제출 현황을 빠르게 판단할 수 있는 오답 대시보드입니다."""
+    current_teacher = st.session_state.teacher_name
+    roster = get_roster_df()
+    raw_df = get_all_wrong_answers()
+
+    if not current_teacher:
+        st.warning("로그인한 선생님 정보가 없습니다. 로그아웃 후 다시 로그인해주세요.")
+        return
+
+    if roster.empty:
+        st.info("등록된 학생 명단이 없습니다.")
+        return
+
+    if current_teacher == ALL_TEACHER_ADMIN:
+        teacher_options = sorted(
+            roster["담당선생님"]
+            .dropna()
+            .astype(str)
+            .map(normalize_teacher_name)
+            .unique()
+            .tolist()
+        )
+        selected_teacher = st.selectbox(
+            "담당 선생님",
+            teacher_options,
+            key="answer_dashboard_teacher",
+        )
+    else:
+        selected_teacher = normalize_teacher_name(current_teacher)
+        st.markdown(f"**담당 선생님:** {selected_teacher}")
+
+    teacher_roster = roster[
+        roster["담당선생님"].apply(normalize_teacher_name)
+        == selected_teacher
+    ].copy()
+
+    if teacher_roster.empty:
+        st.info("담당 학생 명단이 없습니다.")
+        return
+
+    class_options = sorted(
+        teacher_roster["반명"]
+        .dropna()
+        .astype(str)
+        .unique()
+        .tolist()
+    )
+
+    selected_class = st.selectbox(
+        "반 선택",
+        class_options,
+        key="answer_dashboard_class",
+    )
+
+    class_roster = teacher_roster[
+        teacher_roster["반명"].astype(str) == selected_class
+    ].copy()
+
+    class_students = sorted(
+        class_roster["학생명"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .unique()
+        .tolist()
+    )
+
+    allowed_pairs = []
+    for _, row in class_roster.iterrows():
+        student_name = str(row.get("학생명", "") or "").strip()
+        for book in split_roster_books(row.get("매칭교재", "")):
+            allowed_pairs.append((student_name, book))
+
+    if raw_df.empty:
+        class_answers = pd.DataFrame(
+            columns=["학생", "학년", "교재", "문제번호", "비고", "작성일시"]
+        )
+    else:
+        allowed_pair_set = set(allowed_pairs)
+        class_answers = raw_df[
+            raw_df.apply(
+                lambda row: (
+                    str(row.get("학생", "") or "").strip(),
+                    str(row.get("교재", "") or "").strip(),
+                ) in allowed_pair_set,
+                axis=1,
+            )
+        ].copy()
+
+    if not class_answers.empty:
+        class_answers["_작성일시_dt"] = pd.to_datetime(
+            class_answers["작성일시"],
+            errors="coerce",
+        )
+        class_answers = class_answers[
+            class_answers["_작성일시_dt"].notna()
+        ].copy()
+        class_answers["_날짜"] = class_answers["_작성일시_dt"].dt.date
+        class_answers["_문제수"] = class_answers["문제번호"].apply(
+            lambda value: len(parse_problem_numbers(value))
+        )
+
+    today = datetime.now(KST).date()
+
+    today_students = set()
+    today_problem_count = 0
+    if not class_answers.empty:
+        today_df = class_answers[class_answers["_날짜"] == today]
+        today_students = set(
+            today_df["학생"].dropna().astype(str).tolist()
+        )
+        today_problem_count = int(today_df["_문제수"].sum())
+
+    missing_students = [
+        name for name in class_students
+        if name not in today_students
+    ]
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("반 학생", len(class_students))
+    col2.metric("오늘 제출", len(today_students))
+    col3.metric("오늘 미제출", len(missing_students))
+    col4.metric("오늘 문제 수", today_problem_count)
+
+    st.caption(
+        f"{selected_class} · 학생 이름을 펼치면 최근 제출 문제번호를 바로 확인할 수 있습니다."
+    )
+
+    filter_col1, filter_col2 = st.columns([1, 2])
+
+    with filter_col1:
+        status_filter = st.radio(
+            "빠른 보기",
+            ["전체", "오늘 제출", "미제출", "최근 제출"],
+            horizontal=True,
+            key="answer_dashboard_status",
+        )
+
+    with filter_col2:
+        search_student = st.text_input(
+            "학생 검색",
+            placeholder="학생 이름 입력",
+            key="answer_dashboard_student_search",
+        ).strip()
+
+    student_rows = []
+
+    for student_name in class_students:
+        student_answers = (
+            class_answers[
+                class_answers["학생"].astype(str) == student_name
+            ].copy()
+            if not class_answers.empty
+            else pd.DataFrame()
+        )
+
+        if student_answers.empty:
+            latest_dt = pd.NaT
+            latest_text = "-"
+            today_count = 0
+            total_count = 0
+        else:
+            latest_dt = student_answers["_작성일시_dt"].max()
+            latest_text = (
+                latest_dt.strftime("%m/%d %H:%M")
+                if pd.notna(latest_dt)
+                else "-"
+            )
+            today_count = int(
+                student_answers.loc[
+                    student_answers["_날짜"] == today,
+                    "_문제수",
+                ].sum()
+            )
+            total_count = int(student_answers["_문제수"].sum())
+
+        student_rows.append(
+            {
+                "학생": student_name,
+                "오늘문제수": today_count,
+                "최근제출": latest_text,
+                "_최근제출_dt": latest_dt,
+                "누적문제수": total_count,
+                "오늘제출": student_name in today_students,
+            }
+        )
+
+    summary_df = pd.DataFrame(student_rows)
+
+    if status_filter == "오늘 제출":
+        summary_df = summary_df[summary_df["오늘제출"]].copy()
+    elif status_filter == "미제출":
+        summary_df = summary_df[~summary_df["오늘제출"]].copy()
+    elif status_filter == "최근 제출":
+        summary_df = summary_df.sort_values(
+            "_최근제출_dt",
+            ascending=False,
+            na_position="last",
+        ).head(12)
+
+    if search_student:
+        summary_df = summary_df[
+            summary_df["학생"].str.contains(
+                search_student,
+                case=False,
+                na=False,
+                regex=False,
+            )
+        ].copy()
+
+    if status_filter != "최근 제출":
+        summary_df = summary_df.sort_values(
+            by=["오늘제출", "오늘문제수", "_최근제출_dt", "학생"],
+            ascending=[False, False, False, True],
+            na_position="last",
+        )
+
+    if summary_df.empty:
+        st.info("현재 조건에 해당하는 학생이 없습니다.")
+    else:
+        st.markdown("### 학생별 제출 현황")
+
+        for _, summary_row in summary_df.iterrows():
+            student_name = summary_row["학생"]
+            today_count = int(summary_row["오늘문제수"])
+            latest_text = str(summary_row["최근제출"])
+            status_icon = "🟢" if summary_row["오늘제출"] else "⚪"
+
+            expander_label = (
+                f"{status_icon} {student_name}  ·  "
+                f"오늘 {today_count}문제  ·  최근 {latest_text}"
+            )
+
+            with st.expander(expander_label, expanded=False):
+                student_answers = (
+                    class_answers[
+                        class_answers["학생"].astype(str) == student_name
+                    ].copy()
+                    if not class_answers.empty
+                    else pd.DataFrame()
+                )
+
+                if student_answers.empty:
+                    st.info("아직 제출한 오답이 없습니다.")
+                    continue
+
+                student_answers = student_answers.sort_values(
+                    "_작성일시_dt",
+                    ascending=False,
+                )
+
+                daily_summary = (
+                    student_answers.groupby("_날짜", sort=False)["_문제수"]
+                    .sum()
+                    .reset_index()
+                    .sort_values("_날짜", ascending=False)
+                    .head(7)
+                )
+
+                recent_cols = st.columns(min(len(daily_summary), 4) or 1)
+                for idx, (_, day_row) in enumerate(daily_summary.iterrows()):
+                    if idx >= 4:
+                        break
+                    day_value = day_row["_날짜"]
+                    recent_cols[idx].metric(
+                        day_value.strftime("%m/%d"),
+                        f"{int(day_row['_문제수'])}문제",
+                    )
+
+                detail_dates = sorted(
+                    student_answers["_날짜"].unique().tolist(),
+                    reverse=True,
+                )
+
+                selected_date = st.selectbox(
+                    "자세한 번호 보기",
+                    detail_dates,
+                    format_func=lambda value: value.strftime("%Y.%m.%d"),
+                    key=f"answer_detail_date_{selected_teacher}_{selected_class}_{student_name}",
+                )
+
+                date_answers = student_answers[
+                    student_answers["_날짜"] == selected_date
+                ].copy()
+
+                detail_records = []
+                for _, answer_row in date_answers.iterrows():
+                    book = str(answer_row.get("교재", "") or "")
+                    problem_raw = str(answer_row.get("문제번호", "") or "")
+                    problem_display = format_xpattern_display_numbers(
+                        book,
+                        problem_raw,
+                    )
+                    detail_records.append(
+                        {
+                            "교재": book,
+                            "문제번호": problem_display,
+                            "문제수": len(parse_problem_numbers(problem_raw)),
+                            "제출시간": answer_row["_작성일시_dt"].strftime("%H:%M"),
+                            "비고": str(answer_row.get("비고", "") or ""),
+                        }
+                    )
+
+                detail_df = pd.DataFrame(detail_records)
+                selected_total = int(detail_df["문제수"].sum())
+
+                st.markdown(
+                    f"**{selected_date.strftime('%m/%d')} 총 {selected_total}문제**"
+                )
+                st.dataframe(
+                    detail_df,
+                    use_container_width=True,
+                    hide_index=True,
+                    column_order=["교재", "문제수", "문제번호", "제출시간", "비고"],
+                    column_config={
+                        "문제수": st.column_config.NumberColumn(
+                            "문제수",
+                            format="%d",
+                        ),
+                    },
+                )
+
+    with st.expander("📄 원본 표 / 엑셀 다운로드", expanded=False):
+        if class_answers.empty:
+            st.info("다운로드할 기록이 없습니다.")
+        else:
+            export_df = class_answers.copy()
+            export_df["문제번호"] = export_df.apply(
+                lambda row: format_xpattern_display_numbers(
+                    row["교재"],
+                    row["문제번호"],
+                ),
+                axis=1,
+            )
+            export_df = export_df[
+                ["학생", "학년", "교재", "문제번호", "비고", "작성일시"]
+            ].sort_values("작성일시", ascending=False)
+
+            st.dataframe(
+                export_df,
+                use_container_width=True,
+                hide_index=True,
+                height=420,
+            )
+
+            st.download_button(
+                "엑셀로 다운로드",
+                data=dataframe_to_excel_bytes(export_df),
+                file_name=(
+                    f"{selected_teacher}_{selected_class}_전체오답현황.xlsx"
+                ),
+                mime=(
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                key="download_teacher_answer_dashboard",
+            )
+
+            variant_df = export_df[
+                export_df["비고"].fillna("").str.contains(
+                    "변형",
+                    case=False,
+                    na=False,
+                    regex=False,
+                )
+            ].copy()
+
+            if not variant_df.empty:
+                st.markdown("#### 🧩 변형문제 필요 학생")
+                st.dataframe(
+                    variant_df,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+
 def render_student_detail_view():
     """선생님 관리 화면에서 학생 한 명의 정보를 한 화면에 모아 보여줍니다."""
     current_teacher = st.session_state.teacher_name
@@ -8697,150 +9075,7 @@ def show_admin():
         render_student_detail_view()
 
     with tab_answers:
-        df = get_all_wrong_answers()
-        roster = get_roster_df()
-        current_teacher = st.session_state.teacher_name
-
-        if not current_teacher:
-            st.warning("로그인한 선생님 정보가 없습니다. 로그아웃 후 다시 로그인해주세요.")
-            df = pd.DataFrame()
-        elif current_teacher == ALL_TEACHER_ADMIN:
-            # 전체 관리자는 모든 학생의 오답 기록을 확인합니다.
-            df = merge_wrong_answers_by_day(df)
-        elif roster.empty:
-            st.info("등록된 학생 명단이 없습니다.")
-            df = pd.DataFrame()
-        else:
-            teacher_roster = roster[
-                roster["담당선생님"] == current_teacher
-            ][["학생명", "매칭교재"]].drop_duplicates()
-
-            # 한 학생의 명단 교재가 "교재A, 교재B"처럼 한 셀에 여러 개 들어간 경우
-            # 실제 wrong_answers.unit의 개별 교재명과 정상적으로 매칭되도록 행을 분리합니다.
-            expanded_rows = []
-            for _, roster_row in teacher_roster.iterrows():
-                books = split_roster_books(roster_row["매칭교재"])
-                for roster_book in books:
-                    expanded_rows.append(
-                        {
-                            "학생명": str(roster_row["학생명"]).strip(),
-                            "매칭교재": roster_book,
-                        }
-                    )
-
-            teacher_roster_expanded = pd.DataFrame(
-                expanded_rows,
-                columns=["학생명", "매칭교재"],
-            ).drop_duplicates()
-
-            # 같은 이름의 다른 학생 또는 다른 교재 기록이 섞이지 않도록
-            # 학생명 + 개별 교재를 함께 기준으로 로그인한 선생님의 기록만 표시합니다.
-            df = df.merge(
-                teacher_roster_expanded,
-                left_on=["학생", "교재"],
-                right_on=["학생명", "매칭교재"],
-                how="inner"
-            ).drop(columns=["학생명", "매칭교재"])
-
-            # 같은 학생이 같은 날 같은 교재에 여러 번 입력한 기록은 한 줄로 통합합니다.
-            df = merge_wrong_answers_by_day(df)
-
-        if df.empty:
-            st.info(f"{current_teacher or '해당 선생님'} 담당 학생의 오답 기록이 없습니다.")
-        else:
-            df["학년"] = df["학년"].fillna("미지정")
-
-            col1, col2, col3 = st.columns(3)
-
-            with col1:
-                student_filter = st.selectbox(
-                    "학생 필터",
-                    ["전체"] + sorted(df["학생"].unique().tolist()),
-                    key="answer_student_filter",
-                )
-
-            with col2:
-                grade_filter = st.selectbox(
-                    "학년 필터",
-                    ["전체"] + sorted(df["학년"].unique().tolist()),
-                    key="answer_grade_filter",
-                )
-
-            with col3:
-                book_filter = st.selectbox(
-                    "교재 필터",
-                    ["전체"] + BOOKS,
-                    key="answer_book_filter",
-                )
-
-            display_df = df.copy()
-
-            if student_filter != "전체":
-                display_df = display_df[display_df["학생"] == student_filter]
-            if grade_filter != "전체":
-                display_df = display_df[display_df["학년"] == grade_filter]
-            if book_filter != "전체":
-                display_df = display_df[display_df["교재"] == book_filter]
-
-            if not display_df.empty:
-                # X-패턴 계열만 내부 번호(예: 3604)를 원래 시험지 번호(예: 4)로 되돌려 표시.
-                # 저장된 wrong_answers 값 자체는 그대로라 오답노트 생성 파이프라인에는 영향 없음.
-                display_df["문제번호"] = display_df.apply(
-                    lambda row: format_xpattern_display_numbers(
-                        row["교재"], row["문제번호"]
-                    ),
-                    axis=1,
-                )
-
-            if current_teacher == ALL_TEACHER_ADMIN:
-                st.caption(
-                    "전체 학생의 오답 기록이 표시되며, "
-                    "같은 날짜·교재의 입력은 한 줄로 합쳐집니다."
-                )
-            else:
-                st.caption(
-                    f"{current_teacher} 담당 학생의 기록만 표시되며, "
-                    "같은 날짜·교재의 입력은 한 줄로 합쳐집니다."
-                )
-            st.write(f"총 {len(display_df)}건")
-            st.dataframe(
-                display_df,
-                use_container_width=True,
-                hide_index=True,
-                height=520
-            )
-
-            st.download_button(
-                "엑셀로 다운로드",
-                data=dataframe_to_excel_bytes(display_df),
-                file_name=("전체관리자_전체오답현황.xlsx" if current_teacher == ALL_TEACHER_ADMIN else f"{current_teacher}_전체오답현황.xlsx"),
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                key="download_all_answers",
-            )
-
-            with st.expander("🧩 변형문제 필요 학생", expanded=False):
-                variant_df = display_df[
-                    display_df["비고"].fillna("").str.contains(
-                        "변형", case=False, na=False, regex=False
-                    )
-                ].copy()
-
-                if variant_df.empty:
-                    st.info("비고에 '변형'이 포함된 기록이 없습니다.")
-                else:
-                    st.dataframe(
-                        variant_df,
-                        use_container_width=True,
-                        hide_index=True
-                    )
-                    st.download_button(
-                        "변형문제 필요 학생 엑셀 다운로드",
-                        data=dataframe_to_excel_bytes(variant_df),
-                        file_name="변형문제_필요학생.xlsx",
-                        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                        key="download_variant_students",
-                    )
-
+        render_teacher_wrong_answer_dashboard()
 
     with tab_weekly_submission:
         render_weekly_submission_status()
