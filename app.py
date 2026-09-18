@@ -7,6 +7,7 @@ import html
 import json
 import urllib.request
 import urllib.error
+import time
 from collections import Counter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -1129,49 +1130,58 @@ def show_global_footer():
 
 
 # ---------------------- Supabase 연결 ----------------------
+@st.cache_data(ttl=300, show_spinner=False)
+def check_supabase_connection_cached() -> tuple[bool, str]:
+    """
+    Supabase 연결을 가볍게 확인합니다.
+
+    Streamlit은 위젯 조작 때마다 스크립트를 다시 실행하므로,
+    예전처럼 모든 테이블에 매번 10번씩 요청하면 연결 자원이 빠르게 소모될 수 있습니다.
+    5분 캐시 + 단일 경량 쿼리 + 일시 오류 재시도로 확인합니다.
+    """
+    last_error = ""
+
+    for attempt in range(3):
+        try:
+            (
+                supabase.table("users")
+                .select("username")
+                .limit(1)
+                .execute()
+            )
+            return True, ""
+        except Exception as error:
+            last_error = f"{type(error).__name__}: {error}"
+
+            # 일시적인 소켓/네트워크 자원 부족은 짧게 기다렸다가 재시도합니다.
+            if attempt < 2:
+                time.sleep(0.6 * (attempt + 1))
+
+    return False, last_error
+
+
 def verify_supabase_connection():
-    """앱 시작 시 Supabase 연결과 각 테이블을 순서대로 확인합니다."""
+    """앱 시작 시 Supabase 기본 연결을 확인합니다."""
     if not SUPABASE_URL.startswith("https://"):
         st.error("SUPABASE_URL 형식이 올바르지 않습니다.")
-        st.code("https://프로젝트ID.supabase.co")
         st.stop()
 
     if not SUPABASE_KEY:
         st.error("SUPABASE_KEY가 비어 있습니다.")
         st.stop()
 
-    checks = [
-        ("users", "username"),
-        ("wrong_answers", "id"),
-        ("student_roster", "id"),
-        ("print_status", "id"),
-        ("book_master", "id"),
-        ("school_exam_master", "id"),
-        ("school_exam_wrong_answers", "id"),
-        ("password_reset_requests", "id"),
-        ("notices", "id"),
-        ("school_exam_grade_imports", "id"),
-    ]
+    ok, error_text = check_supabase_connection_cached()
 
-    for table_name, column_name in checks:
-        try:
-            (
-                supabase.table(table_name)
-                .select(column_name)
-                .limit(1)
-                .execute()
-            )
-        except Exception as error:
-            st.error(f"Supabase의 '{table_name}' 테이블 연결에 실패했습니다.")
-            st.code(
-                f"{type(error).__name__}: {error}",
-                language="text"
-            )
-            st.info(
-                "위 오류 문구를 확인하면 URL·API Key·테이블·권한 중 "
-                "어느 부분이 문제인지 정확히 알 수 있습니다."
-            )
-            st.stop()
+    if not ok:
+        st.error(
+            "Supabase 연결이 잠시 불안정합니다. "
+            "잠시 후 새로고침해주세요."
+        )
+        # 내부 상세 오류는 사용자 화면에 과도하게 노출하지 않습니다.
+        if error_text:
+            st.caption(f"연결 오류: {error_text[:180]}")
+        st.stop()
+
 
 
 def fetch_all_rows(
@@ -9170,10 +9180,15 @@ def restore_users_from_excel(
 # ---------------------- 초기화 ----------------------
 verify_supabase_connection()
 
-try:
-    cleanup_duplicate_wrong_answers()
-except Exception as cleanup_error:
-    st.warning(f"기존 중복 오답 정리 중 오류가 발생했습니다: {cleanup_error}")
+# Streamlit은 버튼/필터 조작 때마다 전체 스크립트를 다시 실행하므로
+# 중복 정리는 브라우저 세션당 한 번만 실행합니다.
+if "duplicate_cleanup_done" not in st.session_state:
+    try:
+        cleanup_duplicate_wrong_answers()
+        st.session_state.duplicate_cleanup_done = True
+    except Exception:
+        # 앱 사용 자체를 막지 않고 다음 세션에서 다시 시도합니다.
+        st.session_state.duplicate_cleanup_done = False
 
 apply_global_style()
 
