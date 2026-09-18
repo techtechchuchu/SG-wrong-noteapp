@@ -16,6 +16,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 from supabase import Client, create_client
+from pypdf import PdfReader
 
 
 # ---------------------- 기본 설정 ----------------------
@@ -9804,6 +9805,218 @@ def show_student():
             st.rerun()
 
 
+
+def parse_submission_report_pdf(uploaded_file) -> dict:
+    """오답 제출 명단 PDF에서 집계 시작/마감 시각과 요약 정보를 읽습니다."""
+    result = {
+        "filename": getattr(uploaded_file, "name", ""),
+        "teacher": "",
+        "start_at": None,
+        "cutoff_at": None,
+        "target_count": None,
+        "note_count": None,
+        "ok": False,
+        "error": "",
+    }
+
+    try:
+        pdf_bytes = uploaded_file.getvalue()
+        reader = PdfReader(io.BytesIO(pdf_bytes))
+        text = "\n".join(
+            (page.extract_text() or "")
+            for page in reader.pages
+        ).strip()
+
+        if not text:
+            result["error"] = "PDF에서 텍스트를 읽지 못했습니다."
+            return result
+
+        teacher_match = re.search(
+            r"(?:(원장님반\()?\s*)?([가-힣]{2,4})T\)?\s*오답\s*제출\s*명단",
+            text,
+        )
+        if teacher_match:
+            result["teacher"] = f"{teacher_match.group(2)}.T"
+
+        start_match = re.search(
+            r"기준\s*:\s*(20\d{2})[-./](\d{1,2})[-./](\d{1,2})\s+(\d{1,2}):(\d{2})\s*이후\s*제출",
+            text,
+        )
+        if start_match:
+            result["start_at"] = datetime(
+                int(start_match.group(1)),
+                int(start_match.group(2)),
+                int(start_match.group(3)),
+                int(start_match.group(4)),
+                int(start_match.group(5)),
+            )
+
+        cutoff_match = re.search(
+            r"생성\s*(20\d{2})[-./](\d{1,2})[-./](\d{1,2})\s+(\d{1,2}):(\d{2})",
+            text,
+        )
+        if cutoff_match:
+            result["cutoff_at"] = datetime(
+                int(cutoff_match.group(1)),
+                int(cutoff_match.group(2)),
+                int(cutoff_match.group(3)),
+                int(cutoff_match.group(4)),
+                int(cutoff_match.group(5)),
+            )
+
+        count_match = re.search(
+            r"대상\s*(\d+)명\s*/\s*오답노트\s*(\d+)건",
+            text,
+        )
+        if count_match:
+            result["target_count"] = int(count_match.group(1))
+            result["note_count"] = int(count_match.group(2))
+
+        # 본문 파싱이 일부 실패하면 파일명 "(09.13 0000 ~ 09.16 2125)"을 보조로 사용합니다.
+        if result["start_at"] is None or result["cutoff_at"] is None:
+            filename_match = re.search(
+                r"\((\d{1,2})[.]?(\d{1,2})\s*(\d{2})(\d{2})\s*~\s*"
+                r"(\d{1,2})[.]?(\d{1,2})\s*(\d{2})(\d{2})\)",
+                result["filename"],
+            )
+            if filename_match:
+                year = datetime.now(KST).year
+                if result["start_at"] is None:
+                    result["start_at"] = datetime(
+                        year,
+                        int(filename_match.group(1)),
+                        int(filename_match.group(2)),
+                        int(filename_match.group(3)),
+                        int(filename_match.group(4)),
+                    )
+                if result["cutoff_at"] is None:
+                    result["cutoff_at"] = datetime(
+                        year,
+                        int(filename_match.group(5)),
+                        int(filename_match.group(6)),
+                        int(filename_match.group(7)),
+                        int(filename_match.group(8)),
+                    )
+
+        result["ok"] = result["cutoff_at"] is not None
+
+        if not result["ok"]:
+            result["error"] = "제출 마감 시각을 자동으로 찾지 못했습니다."
+
+        return result
+
+    except Exception as error:
+        result["error"] = str(error)
+        return result
+
+
+def render_submission_report_uploader():
+    """PDF 오답명단을 올리면 제출 반영 마감 시각을 즉시 보여줍니다."""
+    st.markdown("### 📄 오답명단 PDF 집계 기준")
+    st.caption(
+        "오답 제출 명단 PDF를 올리면 보고서 안의 기준 시각을 읽어서 "
+        "이번 출력분에 언제까지 제출한 오답이 반영됐는지 바로 표시합니다."
+    )
+
+    report_files = st.file_uploader(
+        "오답 제출 명단 PDF 업로드",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key="submission_report_pdf_uploader",
+        help="노대근T / 박병민T / 이주백T 오답 제출 명단 PDF를 여러 개 한 번에 올릴 수 있습니다.",
+    )
+
+    if not report_files:
+        st.info(
+            "PDF를 올리면 예: '09/16 21:25까지 제출분 반영'처럼 자동으로 표시됩니다."
+        )
+        return
+
+    parsed_reports = [
+        parse_submission_report_pdf(file)
+        for file in report_files
+    ]
+
+    success_reports = [
+        report for report in parsed_reports
+        if report["ok"]
+    ]
+
+    failed_reports = [
+        report for report in parsed_reports
+        if not report["ok"]
+    ]
+
+    if success_reports:
+        cutoff_values = [
+            report["cutoff_at"]
+            for report in success_reports
+            if report["cutoff_at"] is not None
+        ]
+        latest_cutoff = max(cutoff_values) if cutoff_values else None
+        earliest_start = min(
+            (
+                report["start_at"]
+                for report in success_reports
+                if report["start_at"] is not None
+            ),
+            default=None,
+        )
+
+        if latest_cutoff is not None:
+            st.success(
+                f"✅ 이번 PDF 기준: {latest_cutoff.strftime('%m/%d %H:%M')}까지 "
+                "제출한 오답이 이번 출력분에 반영됩니다."
+            )
+
+        if earliest_start is not None and latest_cutoff is not None:
+            st.caption(
+                f"집계 구간: {earliest_start.strftime('%Y.%m.%d %H:%M')} "
+                f"~ {latest_cutoff.strftime('%Y.%m.%d %H:%M')}"
+            )
+
+        cards = st.columns(min(len(success_reports), 3) or 1)
+
+        for idx, report in enumerate(success_reports):
+            with cards[idx % len(cards)]:
+                teacher_label = report["teacher"] or report["filename"]
+                cutoff_text = (
+                    report["cutoff_at"].strftime("%m/%d %H:%M")
+                    if report["cutoff_at"] is not None
+                    else "-"
+                )
+                start_text = (
+                    report["start_at"].strftime("%m/%d %H:%M")
+                    if report["start_at"] is not None
+                    else "-"
+                )
+
+                st.markdown(f"#### {teacher_label}")
+                st.metric("제출 반영 마감", cutoff_text)
+                st.caption(f"집계 시작: {start_text}")
+
+                if report["target_count"] is not None:
+                    st.write(
+                        f"대상 **{report['target_count']}명**"
+                        + (
+                            f" · 오답노트 **{report['note_count']}건**"
+                            if report["note_count"] is not None
+                            else ""
+                        )
+                    )
+
+        st.info(
+            "📌 위 마감 시각 이후에 학생이 제출한 오답은 "
+            "이번 PDF에는 포함되지 않은 것으로 보면 됩니다."
+        )
+
+    for report in failed_reports:
+        st.warning(
+            f"{report['filename']}: {report['error']}"
+        )
+
+
+
 # ---------------------- 선생님 관리 화면 ----------------------
 def show_admin():
     if not st.session_state.is_admin:
@@ -9907,6 +10120,9 @@ def show_admin():
         )
 
     with tab_output_group:
+        render_submission_report_uploader()
+        st.divider()
+
         (
             tab_paper,
             tab_print,
