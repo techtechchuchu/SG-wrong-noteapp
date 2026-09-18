@@ -2,6 +2,7 @@ import io
 import base64
 import re
 import hashlib
+import hmac
 import html
 import json
 import urllib.request
@@ -282,6 +283,11 @@ except Exception:
     SUPERADMIN_PASSWORD = None
 
 try:
+    SESSION_SECRET = str(st.secrets["SESSION_SECRET"]).strip()
+except Exception:
+    SESSION_SECRET = ""
+
+try:
     ANTHROPIC_API_KEY = str(st.secrets["ANTHROPIC_API_KEY"]).strip()
 except Exception:
     ANTHROPIC_API_KEY = ""
@@ -317,6 +323,104 @@ KST = ZoneInfo("Asia/Seoul")
 def now_kst_iso() -> str:
     """Supabase timestamp 컬럼에 저장할 한국 시간 문자열입니다."""
     return datetime.now(KST).replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+SESSION_QUERY_KEY = "sg_session"
+SESSION_TTL_HOURS = 12
+
+
+def _b64url_encode(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _b64url_decode(value: str) -> bytes:
+    padding = "=" * (-len(value) % 4)
+    return base64.urlsafe_b64decode((value + padding).encode("ascii"))
+
+
+def make_persistent_session_token(
+    role: str,
+    student_user: str = "",
+    teacher_name: str = "",
+) -> str:
+    """새로고침 후에도 로그인 상태를 복원하기 위한 서명 토큰을 만듭니다."""
+    if not SESSION_SECRET:
+        return ""
+
+    payload = {
+        "role": str(role or ""),
+        "student_user": str(student_user or ""),
+        "teacher_name": str(teacher_name or ""),
+        "exp": int(datetime.now().timestamp()) + (SESSION_TTL_HOURS * 60 * 60),
+    }
+    payload_bytes = json.dumps(
+        payload,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+    payload_part = _b64url_encode(payload_bytes)
+    signature = hmac.new(
+        SESSION_SECRET.encode("utf-8"),
+        payload_part.encode("ascii"),
+        hashlib.sha256,
+    ).digest()
+
+    return f"{payload_part}.{_b64url_encode(signature)}"
+
+
+def parse_persistent_session_token(token: str) -> dict | None:
+    """서명과 만료시간을 확인한 뒤 로그인 정보를 반환합니다."""
+    if not SESSION_SECRET or not token or "." not in token:
+        return None
+
+    try:
+        payload_part, signature_part = token.split(".", 1)
+        expected_signature = hmac.new(
+            SESSION_SECRET.encode("utf-8"),
+            payload_part.encode("ascii"),
+            hashlib.sha256,
+        ).digest()
+        received_signature = _b64url_decode(signature_part)
+
+        if not hmac.compare_digest(expected_signature, received_signature):
+            return None
+
+        payload = json.loads(_b64url_decode(payload_part).decode("utf-8"))
+
+        if int(payload.get("exp", 0)) < int(datetime.now().timestamp()):
+            return None
+
+        if payload.get("role") not in {"student", "admin", "superadmin"}:
+            return None
+
+        return payload
+    except Exception:
+        return None
+
+
+def set_persistent_session(
+    role: str,
+    student_user: str = "",
+    teacher_name: str = "",
+):
+    """브라우저 새로고침에서도 유지되는 로그인 토큰을 URL에 저장합니다."""
+    token = make_persistent_session_token(
+        role,
+        student_user=student_user,
+        teacher_name=teacher_name,
+    )
+    if token:
+        st.query_params[SESSION_QUERY_KEY] = token
+
+
+def clear_persistent_session():
+    """로그아웃 시 영구 로그인 토큰을 제거합니다."""
+    try:
+        if SESSION_QUERY_KEY in st.query_params:
+            del st.query_params[SESSION_QUERY_KEY]
+    except Exception:
+        pass
 
 
 def get_qr_signup_code():
@@ -9015,6 +9119,40 @@ if "is_superadmin" not in st.session_state:
     st.session_state.is_superadmin = False
 
 
+# 브라우저 새로고침으로 Streamlit 세션이 초기화돼도 서명된 토큰이 있으면 로그인 상태를 복원합니다.
+if st.session_state.role is None and SESSION_SECRET:
+    try:
+        saved_token = st.query_params.get(SESSION_QUERY_KEY, "")
+    except Exception:
+        saved_token = ""
+
+    saved_session = parse_persistent_session_token(saved_token)
+
+    if saved_session:
+        saved_role = saved_session.get("role")
+
+        if saved_role == "student":
+            saved_student = str(saved_session.get("student_user", "") or "").strip()
+            if saved_student:
+                st.session_state.role = "student"
+                st.session_state.student_user = saved_student
+
+        elif saved_role == "admin":
+            saved_teacher = normalize_teacher_name(
+                saved_session.get("teacher_name", "")
+            )
+            if saved_teacher in TEACHERS + [ALL_TEACHER_ADMIN]:
+                st.session_state.role = "admin"
+                st.session_state.is_admin = True
+                st.session_state.teacher_name = saved_teacher
+
+        elif saved_role == "superadmin":
+            st.session_state.role = "superadmin"
+            st.session_state.is_superadmin = True
+    elif saved_token:
+        clear_persistent_session()
+
+
 # ---------------------- 시작 화면 ----------------------
 def show_role_select():
     show_banner()
@@ -9089,6 +9227,10 @@ def show_student():
             if st.button("로그인"):
                 if check_user(username.strip(), password):
                     st.session_state.student_user = username.strip()
+                    set_persistent_session(
+                        "student",
+                        student_user=username.strip(),
+                    )
                     st.rerun()
                 else:
                     st.error("학생 또는 비밀번호가 올바르지 않습니다.")
@@ -9234,6 +9376,7 @@ def show_student():
             ):
                 st.session_state.student_user = None
                 st.session_state.role = None
+                clear_persistent_session()
                 st.rerun()
 
             return
@@ -9582,6 +9725,10 @@ def show_admin():
                 elif pw == SUPERADMIN_PASSWORD:
                     st.session_state.is_admin = True
                     st.session_state.teacher_name = ALL_TEACHER_ADMIN
+                    set_persistent_session(
+                        "admin",
+                        teacher_name=ALL_TEACHER_ADMIN,
+                    )
                     st.rerun()
                 else:
                     st.error("전체 관리자 비밀번호가 올바르지 않습니다.")
@@ -9591,6 +9738,10 @@ def show_admin():
                 elif pw == ADMIN_PASSWORD:
                     st.session_state.is_admin = True
                     st.session_state.teacher_name = selected_teacher_login
+                    set_persistent_session(
+                        "admin",
+                        teacher_name=selected_teacher_login,
+                    )
                     st.rerun()
                 else:
                     st.error("비밀번호가 틀렸습니다.")
@@ -10114,6 +10265,7 @@ def show_admin():
         st.session_state.is_admin = False
         st.session_state.teacher_name = None
         st.session_state.role = None
+        clear_persistent_session()
         st.rerun()
 
 
@@ -10137,6 +10289,7 @@ def show_superadmin():
                 st.error("관리자 비밀번호가 설정되지 않았습니다.")
             elif admin_pw == SUPERADMIN_PASSWORD:
                 st.session_state.is_superadmin = True
+                set_persistent_session("superadmin")
                 st.rerun()
             else:
                 st.error("관리자 비밀번호가 올바르지 않습니다.")
@@ -10483,6 +10636,7 @@ def show_superadmin():
         if st.button("관리자 로그아웃", key="superadmin_logout"):
             st.session_state.is_superadmin = False
             st.session_state.role = None
+            clear_persistent_session()
             st.rerun()
 
 
