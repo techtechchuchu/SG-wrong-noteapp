@@ -4252,22 +4252,76 @@ def render_teacher_wrong_answer_dashboard():
         if name not in today_students
     ]
 
-    col1, col2, col3, col4 = st.columns(4)
+    if class_answers.empty:
+        variant_requests = pd.DataFrame(
+            columns=["학생", "학년", "교재", "문제번호", "비고", "작성일시"]
+        )
+    else:
+        variant_requests = class_answers[
+            class_answers["비고"]
+            .fillna("")
+            .astype(str)
+            .str.contains("변형", case=False, na=False, regex=False)
+        ].copy()
+
+    variant_request_students = (
+        variant_requests["학생"].nunique()
+        if not variant_requests.empty
+        else 0
+    )
+
+    col1, col2, col3, col4, col5 = st.columns(5)
     col1.metric("반 학생", len(class_students))
     col2.metric("오늘 제출", len(today_students))
     col3.metric("오늘 미제출", len(missing_students))
     col4.metric("오늘 문제 수", today_problem_count)
+    col5.metric("변형 요청", variant_request_students)
 
     st.caption(
         f"{selected_class} · 학생 이름을 펼치면 최근 제출 문제번호를 바로 확인할 수 있습니다."
     )
+
+    with st.expander(
+        f"🧩 변형문제 요청 현황 · {variant_request_students}명",
+        expanded=False,
+    ):
+        if variant_requests.empty:
+            st.info("현재 반에서 확인된 변형문제 요청이 없습니다.")
+        else:
+            variant_display = variant_requests.copy()
+            variant_display["문제번호"] = variant_display.apply(
+                lambda row: format_xpattern_display_numbers(
+                    str(row.get("교재", "") or ""),
+                    str(row.get("문제번호", "") or ""),
+                ),
+                axis=1,
+            )
+            variant_display = variant_display.sort_values(
+                "_작성일시_dt",
+                ascending=False,
+            )
+            variant_display["요청일시"] = variant_display[
+                "_작성일시_dt"
+            ].dt.strftime("%Y.%m.%d %H:%M")
+
+            st.caption(
+                "비고에 '변형'이라고 작성된 오답을 모아서 보여줍니다. "
+                "현재는 요청 기록 기준이며 처리 완료 여부는 별도로 관리하지 않습니다."
+            )
+            st.dataframe(
+                variant_display[
+                    ["학생", "교재", "문제번호", "비고", "요청일시"]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
 
     filter_col1, filter_col2 = st.columns([1, 2])
 
     with filter_col1:
         status_filter = st.radio(
             "빠른 보기",
-            ["전체", "오늘 제출", "미제출", "최근 제출"],
+            ["전체", "오늘 제출", "미제출", "최근 제출", "변형 요청"],
             horizontal=True,
             key="answer_dashboard_status",
         )
@@ -4318,6 +4372,12 @@ def render_teacher_wrong_answer_dashboard():
                 "_최근제출_dt": latest_dt,
                 "누적문제수": total_count,
                 "오늘제출": student_name in today_students,
+                "변형요청": (
+                    not variant_requests.empty
+                    and student_name in set(
+                        variant_requests["학생"].dropna().astype(str).tolist()
+                    )
+                ),
             }
         )
 
@@ -4333,6 +4393,8 @@ def render_teacher_wrong_answer_dashboard():
             ascending=False,
             na_position="last",
         ).head(12)
+    elif status_filter == "변형 요청":
+        summary_df = summary_df[summary_df["변형요청"]].copy()
 
     if search_student:
         summary_df = summary_df[
@@ -4361,9 +4423,10 @@ def render_teacher_wrong_answer_dashboard():
             today_count = int(summary_row["오늘문제수"])
             latest_text = str(summary_row["최근제출"])
             status_icon = "🟢" if summary_row["오늘제출"] else "⚪"
+            variant_icon = " 🧩" if summary_row.get("변형요청", False) else ""
 
             expander_label = (
-                f"{status_icon} {student_name}  ·  "
+                f"{status_icon}{variant_icon} {student_name}  ·  "
                 f"오늘 {today_count}문제  ·  최근 {latest_text}"
             )
 
