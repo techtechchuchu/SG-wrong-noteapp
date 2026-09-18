@@ -9955,8 +9955,8 @@ def infer_next_class_date(class_name: str, cutoff_at: datetime | None):
     return None
 
 
-def build_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.DataFrame:
-    """업로드한 보고서의 선생님/집계 구간을 기준으로 전달 대상 학생을 재구성합니다."""
+def build_delivered_rows_from_reports(parsed_reports: list[dict]) -> pd.DataFrame:
+    """업로드한 보고서에 포함된 학생을 이미 전달 완료된 기준으로 재구성합니다."""
     roster = get_roster_df()
     wrong_df = get_all_wrong_answers()
 
@@ -9968,7 +9968,6 @@ def build_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.DataFrame
         "문항수",
         "집계시작",
         "제출마감",
-        "추천전달일",
         "전달상태",
     ]
 
@@ -10078,6 +10077,138 @@ def build_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.DataFrame
         )
 
         for _, row in grouped.iterrows():
+            rows.append(
+                {
+                    "담당선생님": teacher,
+                    "반": str(row.get("반", "") or "").strip(),
+                    "학생": row.get("학생", ""),
+                    "교재": row.get("교재", ""),
+                    "문항수": int(row.get("문항수", 0) or 0),
+                    "집계시작": start_at,
+                    "제출마감": cutoff_at,
+                    "전달상태": "전달완료",
+                }
+            )
+
+    return pd.DataFrame(rows, columns=columns)
+
+
+def build_next_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.DataFrame:
+    """각 선생님 보고서 마감 이후 새로 제출한 학생을 다음 전달 대상으로 만듭니다."""
+    roster = get_roster_df()
+    wrong_df = get_all_wrong_answers()
+
+    columns = [
+        "담당선생님",
+        "반",
+        "학생",
+        "교재",
+        "문항수",
+        "마감후첫제출",
+        "최근제출",
+        "추천전달일",
+        "전달상태",
+    ]
+
+    if roster.empty or wrong_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    working = wrong_df.copy()
+    working["_dt"] = pd.to_datetime(
+        working["작성일시"],
+        errors="coerce",
+    )
+    working = working[working["_dt"].notna()].copy()
+    working["_문항수"] = working["문제번호"].apply(
+        lambda value: len(parse_problem_numbers(value))
+    )
+
+    rows = []
+
+    for report in parsed_reports:
+        if not report.get("ok"):
+            continue
+
+        teacher = normalize_teacher_name(report.get("teacher", ""))
+        cutoff_at = report.get("cutoff_at")
+
+        if not teacher or cutoff_at is None:
+            continue
+
+        teacher_roster = roster[
+            roster["담당선생님"].apply(normalize_teacher_name) == teacher
+        ].copy()
+
+        if teacher_roster.empty:
+            continue
+
+        roster_rows = []
+        for _, roster_row in teacher_roster.iterrows():
+            student_name = str(roster_row.get("학생명", "") or "").strip()
+            class_name = str(roster_row.get("반명", "") or "").strip()
+
+            for book in split_roster_books(roster_row.get("매칭교재", "")):
+                roster_rows.append(
+                    {
+                        "학생": student_name,
+                        "교재": book,
+                        "반": class_name,
+                    }
+                )
+
+        if not roster_rows:
+            continue
+
+        roster_lookup = pd.DataFrame(roster_rows).drop_duplicates()
+        allowed_pairs = set(
+            zip(roster_lookup["학생"], roster_lookup["교재"])
+        )
+
+        next_answers = working[
+            (working["_dt"] > cutoff_at)
+            & working.apply(
+                lambda row: (
+                    str(row.get("학생", "") or "").strip(),
+                    str(row.get("교재", "") or "").strip(),
+                ) in allowed_pairs,
+                axis=1,
+            )
+        ].copy()
+
+        if next_answers.empty:
+            continue
+
+        next_answers = next_answers.merge(
+            roster_lookup,
+            on=["학생", "교재"],
+            how="left",
+        )
+
+        grouped = (
+            next_answers.groupby(
+                ["반", "학생"],
+                dropna=False,
+                sort=False,
+            )
+            .agg(
+                교재=(
+                    "교재",
+                    lambda values: ", ".join(
+                        dict.fromkeys(
+                            str(value).strip()
+                            for value in values
+                            if str(value).strip()
+                        )
+                    ),
+                ),
+                문항수=("_문항수", "sum"),
+                마감후첫제출=("_dt", "min"),
+                최근제출=("_dt", "max"),
+            )
+            .reset_index()
+        )
+
+        for _, row in grouped.iterrows():
             class_name = str(row.get("반", "") or "").strip()
             next_date = infer_next_class_date(class_name, cutoff_at)
 
@@ -10088,10 +10219,10 @@ def build_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.DataFrame
                     "학생": row.get("학생", ""),
                     "교재": row.get("교재", ""),
                     "문항수": int(row.get("문항수", 0) or 0),
-                    "집계시작": start_at,
-                    "제출마감": cutoff_at,
+                    "마감후첫제출": row.get("마감후첫제출"),
+                    "최근제출": row.get("최근제출"),
                     "추천전달일": next_date,
-                    "전달상태": "대기",
+                    "전달상태": "다음 전달 대기",
                 }
             )
 
@@ -10100,7 +10231,7 @@ def build_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.DataFrame
     if result_df.empty:
         return result_df
 
-    result_df = (
+    return (
         result_df.sort_values(
             by=["추천전달일", "담당선생님", "반", "학생"],
             ascending=[True, True, True, True],
@@ -10113,53 +10244,73 @@ def build_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.DataFrame
         .reset_index(drop=True)
     )
 
-    return result_df
-
 
 def render_report_delivery_management(parsed_reports: list[dict]):
-    """PDF 보고서만 업로드하면 자동 생성되는 전달 관리 UI입니다."""
-    delivery_df = build_delivery_rows_from_reports(parsed_reports)
+    """업로드한 보고서는 전달완료 기준, 마감 이후 제출자는 다음 전달 대상으로 보여줍니다."""
+    delivered_df = build_delivered_rows_from_reports(parsed_reports)
+    next_df = build_next_delivery_rows_from_reports(parsed_reports)
 
     st.markdown("### 📦 보고서 기준 전달 관리")
     st.caption(
-        "업로드한 오답명단 PDF의 집계 구간에 실제 제출한 학생만 자동으로 불러옵니다. "
-        "추천 전달일은 반명에 적힌 수업 요일을 기준으로 계산합니다."
+        "업로드한 PDF에 포함된 학생은 이미 전달 완료된 것으로 보고, "
+        "각 보고서의 제출 마감 이후 새로 오답을 제출한 학생만 다음 전달 대상으로 표시합니다."
     )
 
-    if delivery_df.empty:
-        st.info(
-            "보고서에서 전달 대상을 만들지 못했습니다. "
-            "선생님명·집계기간과 학생 명단 매칭을 확인해주세요."
-        )
+    teacher_count = len(
+        {
+            normalize_teacher_name(report.get("teacher", ""))
+            for report in parsed_reports
+            if report.get("ok") and report.get("teacher")
+        }
+    )
+
+    m1, m2, m3 = st.columns(3)
+    m1.metric(
+        "보고서 전달완료",
+        delivered_df["학생"].nunique() if not delivered_df.empty else 0,
+    )
+    m2.metric(
+        "다음 전달 대기",
+        next_df["학생"].nunique() if not next_df.empty else 0,
+    )
+    m3.metric("선생님", teacher_count)
+
+    with st.expander(
+        f"✅ 보고서에 포함된 전달완료 학생 · "
+        f"{delivered_df['학생'].nunique() if not delivered_df.empty else 0}명",
+        expanded=False,
+    ):
+        if delivered_df.empty:
+            st.info("보고서 기준 전달완료 학생을 확인하지 못했습니다.")
+        else:
+            delivered_display = delivered_df.copy()
+            delivered_display["제출마감"] = pd.to_datetime(
+                delivered_display["제출마감"],
+                errors="coerce",
+            ).dt.strftime("%m/%d %H:%M")
+
+            st.dataframe(
+                delivered_display[
+                    ["담당선생님", "반", "학생", "교재", "문항수", "제출마감", "전달상태"]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    st.divider()
+    st.markdown("#### 🟠 다음 전달 대상")
+
+    if next_df.empty:
+        st.success("보고서 마감 이후 새로 제출한 학생이 없습니다.")
         return
 
-    today = datetime.now(KST).date()
-    delivery_df["추천전달일"] = pd.to_datetime(
-        delivery_df["추천전달일"],
+    next_df["추천전달일"] = pd.to_datetime(
+        next_df["추천전달일"],
         errors="coerce",
     ).dt.date
 
-    today_count = int(
-        (delivery_df["추천전달일"] == today).sum()
-    )
-    upcoming_count = int(
-        (
-            delivery_df["추천전달일"].notna()
-            & (delivery_df["추천전달일"] > today)
-        ).sum()
-    )
-
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("전달 대상", delivery_df["학생"].nunique())
-    m2.metric("오늘 전달", today_count)
-    m3.metric("이후 전달", upcoming_count)
-    m4.metric(
-        "선생님",
-        delivery_df["담당선생님"].nunique(),
-    )
-
     teacher_options = ["전체"] + sorted(
-        delivery_df["담당선생님"]
+        next_df["담당선생님"]
         .dropna()
         .astype(str)
         .unique()
@@ -10172,32 +10323,29 @@ def render_report_delivery_management(parsed_reports: list[dict]):
         selected_teacher = st.selectbox(
             "선생님 필터",
             teacher_options,
-            key="report_delivery_teacher",
+            key="next_delivery_teacher",
         )
 
-    filtered = delivery_df.copy()
+    filtered = next_df.copy()
     if selected_teacher != "전체":
         filtered = filtered[
             filtered["담당선생님"] == selected_teacher
         ].copy()
 
     date_options = sorted(
-        [
-            value
-            for value in filtered["추천전달일"].dropna().unique().tolist()
-        ]
+        filtered["추천전달일"].dropna().unique().tolist()
     )
 
     with filter_col2:
         selected_date = st.selectbox(
-            "전달일 필터",
+            "추천 전달일",
             ["전체"] + date_options,
             format_func=lambda value: (
                 "전체"
                 if value == "전체"
-                else value.strftime("%m/%d (%a)")
+                else value.strftime("%m/%d")
             ),
-            key="report_delivery_date",
+            key="next_delivery_date",
         )
 
     if selected_date != "전체":
@@ -10205,121 +10353,39 @@ def render_report_delivery_management(parsed_reports: list[dict]):
             filtered["추천전달일"] == selected_date
         ].copy()
 
-    if filtered.empty:
-        st.info("현재 조건에 해당하는 전달 대상이 없습니다.")
-        return
+    display_df = filtered.copy()
+    display_df["마감후첫제출"] = pd.to_datetime(
+        display_df["마감후첫제출"],
+        errors="coerce",
+    ).dt.strftime("%m/%d %H:%M")
+    display_df["최근제출"] = pd.to_datetime(
+        display_df["최근제출"],
+        errors="coerce",
+    ).dt.strftime("%m/%d %H:%M")
 
-    st.markdown("#### 전달 체크")
-    st.caption(
-        "추천 전달일이 다르면 표에서 날짜를 직접 바꿀 수 있고, "
-        "전달이 끝나면 상태를 '전달완료'로 변경하면 됩니다. "
-        "현재 수정 내용은 이 브라우저 세션에서 유지됩니다."
-    )
-
-    editor_key = "report_delivery_editor"
-
-    edited_df = st.data_editor(
-        filtered[
+    st.dataframe(
+        display_df[
             [
                 "담당선생님",
                 "반",
                 "학생",
                 "교재",
                 "문항수",
+                "마감후첫제출",
+                "최근제출",
                 "추천전달일",
                 "전달상태",
             ]
         ],
         use_container_width=True,
         hide_index=True,
-        num_rows="fixed",
-        key=editor_key,
-        column_config={
-            "담당선생님": st.column_config.TextColumn(
-                "담당 선생님",
-                disabled=True,
-            ),
-            "반": st.column_config.TextColumn(
-                "반",
-                disabled=True,
-            ),
-            "학생": st.column_config.TextColumn(
-                "학생",
-                disabled=True,
-            ),
-            "교재": st.column_config.TextColumn(
-                "교재",
-                disabled=True,
-            ),
-            "문항수": st.column_config.NumberColumn(
-                "문항수",
-                disabled=True,
-                format="%d",
-            ),
-            "추천전달일": st.column_config.DateColumn(
-                "전달 예정일",
-                format="YYYY-MM-DD",
-            ),
-            "전달상태": st.column_config.SelectboxColumn(
-                "상태",
-                options=["대기", "출력완료", "전달완료"],
-                required=True,
-            ),
-        },
     )
 
-    completed_count = int(
-        (edited_df["전달상태"] == "전달완료").sum()
-    )
-    pending_count = len(edited_df) - completed_count
-
-    c1, c2 = st.columns(2)
-    c1.metric("현재 화면 미전달", pending_count)
-    c2.metric("현재 화면 전달완료", completed_count)
-
-    st.divider()
-    st.markdown("#### 📅 전달일별 한눈에 보기")
-
-    overview_df = edited_df.copy()
-    overview_df["전달 예정일"] = pd.to_datetime(
-        overview_df["추천전달일"],
-        errors="coerce",
-    ).dt.date
-
-    valid_dates = sorted(
-        overview_df["전달 예정일"].dropna().unique().tolist()
+    st.caption(
+        "이 목록은 PDF 마감 시각 이후 제출된 학생만 잡습니다. "
+        "즉 보고서에 이미 들어간 학생은 다시 대기 목록에 넣지 않습니다."
     )
 
-    if not valid_dates:
-        st.info("전달 예정일을 확인할 수 있는 학생이 없습니다.")
-    else:
-        for delivery_date in valid_dates:
-            day_df = overview_df[
-                overview_df["전달 예정일"] == delivery_date
-            ].copy()
-
-            pending_names = day_df.loc[
-                day_df["전달상태"] != "전달완료",
-                "학생",
-            ].astype(str).tolist()
-
-            complete_names = day_df.loc[
-                day_df["전달상태"] == "전달완료",
-                "학생",
-            ].astype(str).tolist()
-
-            weekday_names = ["월", "화", "수", "목", "금", "토", "일"]
-            weekday_text = weekday_names[delivery_date.weekday()]
-
-            with st.expander(
-                f"📦 {delivery_date.strftime('%m/%d')} ({weekday_text}) "
-                f"· {len(day_df)}명 · 미전달 {len(pending_names)}명",
-                expanded=(delivery_date == today),
-            ):
-                if pending_names:
-                    st.write("**미전달:** " + ", ".join(pending_names))
-                if complete_names:
-                    st.write("**전달완료:** " + ", ".join(complete_names))
 
 
 def render_submission_report_uploader():
