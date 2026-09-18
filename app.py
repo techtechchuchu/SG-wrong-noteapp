@@ -9569,7 +9569,13 @@ def show_student():
 
         note = st.text_area(
             "비고",
-            placeholder="예: 계산 실수, 개념 헷갈림, 다시 질문 필요, 변형문제 필요 등"
+            placeholder="예: 계산 실수, 개념 헷갈림, 다시 질문 필요 등"
+        )
+
+        request_variant = st.checkbox(
+            "🧩 이 문제로 변형문제를 요청합니다.",
+            key="student_variant_request",
+            help="체크하면 선생님 화면의 '변형문제 요청 현황'에 자동으로 표시됩니다.",
         )
 
         book_confirm_label = f"'{book}' 교재가 맞는지 확인했습니다."
@@ -9632,11 +9638,19 @@ def show_student():
                         note_prefix = f"[{selected_school}" + (f" {exam_tag}" if exam_tag else "") + "] "
 
                 if problem_number_to_save:
+                    final_note = (note_prefix + note.strip()).strip()
+                    if request_variant:
+                        final_note = (
+                            f"{final_note} [변형문제 요청]".strip()
+                            if final_note
+                            else "[변형문제 요청]"
+                        )
+
                     result = add_wrong_answer(
                         st.session_state.student_user,
                         book,
                         problem_number_to_save,
-                        (note_prefix + note.strip()).strip()
+                        final_note
                     )
 
                     if result["saved"]:
