@@ -4279,18 +4279,9 @@ def render_teacher_wrong_answer_dashboard():
             .str.contains("변형", case=False, na=False, regex=False)
         ].copy()
 
-    # 학생별 제출 현황에서는 과거 요청까지 아이콘을 붙이지 않고,
-    # 오늘 실제로 변형문제를 요청한 학생만 표시합니다.
-    if variant_requests.empty:
-        today_variant_requests = variant_requests.copy()
-    else:
-        today_variant_requests = variant_requests[
-            variant_requests["_날짜"] == today
-        ].copy()
-
     variant_request_students = (
-        today_variant_requests["학생"].nunique()
-        if not today_variant_requests.empty
+        variant_requests["학생"].nunique()
+        if not variant_requests.empty
         else 0
     )
 
@@ -4299,7 +4290,7 @@ def render_teacher_wrong_answer_dashboard():
     col2.metric("오늘 제출", len(today_students))
     col3.metric("오늘 미제출", len(missing_students))
     col4.metric("오늘 문제 수", today_problem_count)
-    col5.metric("오늘 변형 요청", variant_request_students)
+    col5.metric("변형 요청", variant_request_students)
 
     scope_label = "전체 반" if selected_class == "전체" else selected_class
     st.caption(
@@ -4307,13 +4298,13 @@ def render_teacher_wrong_answer_dashboard():
     )
 
     with st.expander(
-        f"🧩 오늘 변형문제 요청 현황 · {variant_request_students}명",
+        f"🧩 변형문제 요청 현황 · {variant_request_students}명",
         expanded=False,
     ):
-        if today_variant_requests.empty:
-            st.info("오늘 변형문제를 요청한 학생이 없습니다.")
+        if variant_requests.empty:
+            st.info("변형문제를 요청한 학생이 없습니다.")
         else:
-            variant_display = today_variant_requests.copy()
+            variant_display = variant_requests.copy()
             variant_display["문제번호"] = variant_display.apply(
                 lambda row: format_xpattern_display_numbers(
                     str(row.get("교재", "") or ""),
@@ -4330,8 +4321,7 @@ def render_teacher_wrong_answer_dashboard():
             ].dt.strftime("%Y.%m.%d %H:%M")
 
             st.caption(
-                "오늘 비고에 '변형' 요청이 포함된 오답만 보여줍니다. "
-                "과거 요청은 학생 목록의 아이콘에 표시하지 않습니다."
+                "비고에 '변형' 요청이 포함된 전체 기록을 최근 요청 순으로 보여줍니다."
             )
             st.dataframe(
                 variant_display[
@@ -4398,9 +4388,9 @@ def render_teacher_wrong_answer_dashboard():
                 "누적문제수": total_count,
                 "오늘제출": student_name in today_students,
                 "변형요청": (
-                    not today_variant_requests.empty
+                    not variant_requests.empty
                     and student_name in set(
-                        today_variant_requests["학생"].dropna().astype(str).tolist()
+                        variant_requests["학생"].dropna().astype(str).tolist()
                     )
                 ),
             }
@@ -9921,6 +9911,11 @@ WEEKDAY_KR = {
     "일": 6,
 }
 
+TEACHER_FIXED_DELIVERY_WEEKDAY = {
+    "박병민.T": 2,  # 수요일
+    "이주백.T": 4,  # 금요일
+}
+
 
 def infer_next_class_date(class_name: str, cutoff_at: datetime | None):
     """반명에 포함된 요일(예: 월금일, 화목토)로 다음 수업일을 추정합니다."""
@@ -9950,6 +9945,29 @@ def infer_next_class_date(class_name: str, cutoff_at: datetime | None):
     for delta in range(1, 8):
         candidate = base_date + timedelta(days=delta)
         if candidate.weekday() in weekday_numbers:
+            return candidate
+
+    return None
+
+
+def infer_fixed_teacher_delivery_date(
+    teacher_name: str,
+    cutoff_at: datetime | None,
+):
+    """고정 전달 요일이 있는 선생님의 다음 전달일을 계산합니다."""
+    if cutoff_at is None:
+        return None
+
+    target_weekday = TEACHER_FIXED_DELIVERY_WEEKDAY.get(
+        normalize_teacher_name(teacher_name)
+    )
+    if target_weekday is None:
+        return None
+
+    base_date = cutoff_at.date()
+    for delta in range(1, 8):
+        candidate = base_date + timedelta(days=delta)
+        if candidate.weekday() == target_weekday:
             return candidate
 
     return None
@@ -10210,7 +10228,12 @@ def build_next_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.Data
 
         for _, row in grouped.iterrows():
             class_name = str(row.get("반", "") or "").strip()
-            next_date = infer_next_class_date(class_name, cutoff_at)
+            next_date = infer_fixed_teacher_delivery_date(
+                teacher,
+                cutoff_at,
+            )
+            if next_date is None:
+                next_date = infer_next_class_date(class_name, cutoff_at)
 
             rows.append(
                 {
@@ -10499,6 +10522,105 @@ def render_submission_report_uploader():
 
 
 
+
+def render_variant_request_home_summary():
+    """오답관리 홈에서 담당 학생의 전체 변형문제 요청을 요약합니다."""
+    current_teacher = st.session_state.teacher_name
+    roster = get_roster_df()
+    raw_df = get_all_wrong_answers()
+
+    st.markdown("### 🧩 변형문제 요청")
+
+    if not current_teacher or roster.empty or raw_df.empty:
+        st.info("확인할 변형문제 요청 기록이 없습니다.")
+        return
+
+    if current_teacher == ALL_TEACHER_ADMIN:
+        scoped_roster = roster.copy()
+    else:
+        scoped_roster = roster[
+            roster["담당선생님"].apply(normalize_teacher_name)
+            == normalize_teacher_name(current_teacher)
+        ].copy()
+
+    allowed_pairs = set()
+    for _, row in scoped_roster.iterrows():
+        student_name = str(row.get("학생명", "") or "").strip()
+        for book in split_roster_books(row.get("매칭교재", "")):
+            allowed_pairs.add((student_name, book))
+
+    variant_df = raw_df[
+        raw_df.apply(
+            lambda row: (
+                str(row.get("학생", "") or "").strip(),
+                str(row.get("교재", "") or "").strip(),
+            ) in allowed_pairs,
+            axis=1,
+        )
+    ].copy()
+
+    if not variant_df.empty:
+        variant_df = variant_df[
+            variant_df["비고"]
+            .fillna("")
+            .astype(str)
+            .str.contains("변형", case=False, na=False, regex=False)
+        ].copy()
+
+    if variant_df.empty:
+        st.success("현재 확인된 변형문제 요청이 없습니다.")
+        return
+
+    variant_df["_dt"] = pd.to_datetime(
+        variant_df["작성일시"],
+        errors="coerce",
+    )
+    variant_df = variant_df.sort_values(
+        "_dt",
+        ascending=False,
+        na_position="last",
+    )
+    variant_df["요청일시"] = variant_df["_dt"].dt.strftime("%m/%d %H:%M")
+    variant_df["문제번호"] = variant_df.apply(
+        lambda row: format_xpattern_display_numbers(
+            str(row.get("교재", "") or ""),
+            str(row.get("문제번호", "") or ""),
+        ),
+        axis=1,
+    )
+
+    c1, c2 = st.columns(2)
+    c1.metric("요청 학생", variant_df["학생"].nunique())
+    c2.metric("요청 건수", len(variant_df))
+
+    with st.expander(
+        f"전체 요청 보기 · {len(variant_df)}건",
+        expanded=False,
+    ):
+        st.dataframe(
+            variant_df[
+                ["학생", "교재", "문제번호", "비고", "요청일시"]
+            ],
+            use_container_width=True,
+            hide_index=True,
+            height=420,
+        )
+
+
+def render_wrong_answer_management_home():
+    """선생님이 가장 먼저 보는 오답관리 홈입니다."""
+    st.markdown("## 🏠 오답노트 관리 홈")
+    st.caption(
+        "보고서 업로드, 다음 전달 대상, 변형문제 요청을 한 화면에서 확인합니다."
+    )
+
+    render_submission_report_uploader()
+
+    st.divider()
+    render_variant_request_home_summary()
+
+
+
 # ---------------------- 선생님 관리 화면 ----------------------
 def show_admin():
     if not st.session_state.is_admin:
@@ -10586,6 +10708,7 @@ def show_admin():
 
     with tab_wrong_group:
         (
+            tab_wrong_home,
             tab_answers,
             tab_weekly_submission,
             tab_daily_submission,
@@ -10593,6 +10716,7 @@ def show_admin():
             tab_weekly_missing,
         ) = st.tabs(
             [
+                "🏠 홈",
                 "📋 전체 오답",
                 "📅 주간 제출",
                 "📆 날짜별 제출량",
@@ -10602,8 +10726,10 @@ def show_admin():
         )
 
     with tab_output_group:
-        render_submission_report_uploader()
-        st.divider()
+        st.info(
+            "📄 오답명단 PDF 업로드와 전달 관리는 "
+            "'오답 관리 → 홈'에서 확인할 수 있습니다."
+        )
 
         (
             tab_paper,
@@ -10617,6 +10743,9 @@ def show_admin():
 
     with tab_student_detail:
         render_student_detail_view()
+
+    with tab_wrong_home:
+        render_wrong_answer_management_home()
 
     with tab_answers:
         render_teacher_wrong_answer_dashboard()
