@@ -4268,9 +4268,18 @@ def render_teacher_wrong_answer_dashboard():
             .str.contains("변형", case=False, na=False, regex=False)
         ].copy()
 
+    # 학생별 제출 현황에서는 과거 요청까지 아이콘을 붙이지 않고,
+    # 오늘 실제로 변형문제를 요청한 학생만 표시합니다.
+    if variant_requests.empty:
+        today_variant_requests = variant_requests.copy()
+    else:
+        today_variant_requests = variant_requests[
+            variant_requests["_날짜"] == today
+        ].copy()
+
     variant_request_students = (
-        variant_requests["학생"].nunique()
-        if not variant_requests.empty
+        today_variant_requests["학생"].nunique()
+        if not today_variant_requests.empty
         else 0
     )
 
@@ -4279,7 +4288,7 @@ def render_teacher_wrong_answer_dashboard():
     col2.metric("오늘 제출", len(today_students))
     col3.metric("오늘 미제출", len(missing_students))
     col4.metric("오늘 문제 수", today_problem_count)
-    col5.metric("변형 요청", variant_request_students)
+    col5.metric("오늘 변형 요청", variant_request_students)
 
     scope_label = "전체 반" if selected_class == "전체" else selected_class
     st.caption(
@@ -4287,13 +4296,13 @@ def render_teacher_wrong_answer_dashboard():
     )
 
     with st.expander(
-        f"🧩 변형문제 요청 현황 · {variant_request_students}명",
+        f"🧩 오늘 변형문제 요청 현황 · {variant_request_students}명",
         expanded=False,
     ):
-        if variant_requests.empty:
-            st.info("현재 반에서 확인된 변형문제 요청이 없습니다.")
+        if today_variant_requests.empty:
+            st.info("오늘 변형문제를 요청한 학생이 없습니다.")
         else:
-            variant_display = variant_requests.copy()
+            variant_display = today_variant_requests.copy()
             variant_display["문제번호"] = variant_display.apply(
                 lambda row: format_xpattern_display_numbers(
                     str(row.get("교재", "") or ""),
@@ -4310,8 +4319,8 @@ def render_teacher_wrong_answer_dashboard():
             ].dt.strftime("%Y.%m.%d %H:%M")
 
             st.caption(
-                "비고에 '변형'이라고 작성된 오답을 모아서 보여줍니다. "
-                "현재는 요청 기록 기준이며 처리 완료 여부는 별도로 관리하지 않습니다."
+                "오늘 비고에 '변형' 요청이 포함된 오답만 보여줍니다. "
+                "과거 요청은 학생 목록의 아이콘에 표시하지 않습니다."
             )
             st.dataframe(
                 variant_display[
@@ -4378,9 +4387,9 @@ def render_teacher_wrong_answer_dashboard():
                 "누적문제수": total_count,
                 "오늘제출": student_name in today_students,
                 "변형요청": (
-                    not variant_requests.empty
+                    not today_variant_requests.empty
                     and student_name in set(
-                        variant_requests["학생"].dropna().astype(str).tolist()
+                        today_variant_requests["학생"].dropna().astype(str).tolist()
                     )
                 ),
             }
