@@ -9827,13 +9827,13 @@ def show_admin():
     st.caption(f"현재 로그인: {st.session_state.teacher_name or '선생님 미지정'}")
 
     (
-        tab_student_group,
         tab_wrong_group,
+        tab_student_group,
         tab_output_group,
     ) = st.tabs(
         [
-            "👥 학생 관리",
             "📝 오답 관리",
+            "👥 학생 관리",
             "🖨️ 오답노트 · 출력",
         ]
     )
