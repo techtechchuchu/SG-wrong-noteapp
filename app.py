@@ -10609,14 +10609,21 @@ def render_variant_request_home_summary():
 
 def render_wrong_answer_management_home():
     """선생님이 가장 먼저 보는 오답관리 홈입니다."""
+    current_teacher = st.session_state.teacher_name
+
     st.markdown("## 🏠 오답노트 관리 홈")
-    st.caption(
-        "보고서 업로드, 다음 전달 대상, 변형문제 요청을 한 화면에서 확인합니다."
-    )
 
-    render_submission_report_uploader()
+    if current_teacher == ALL_TEACHER_ADMIN:
+        st.caption(
+            "보고서 업로드, 다음 전달 대상, 변형문제 요청을 한 화면에서 확인합니다."
+        )
+        render_submission_report_uploader()
+        st.divider()
+    else:
+        st.caption(
+            "담당 학생의 오답 및 변형문제 요청 현황을 한 화면에서 확인합니다."
+        )
 
-    st.divider()
     render_variant_request_home_summary()
 
 
