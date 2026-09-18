@@ -10373,7 +10373,7 @@ def infer_fixed_teacher_delivery_date(
 
 
 def build_delivered_rows_from_reports(parsed_reports: list[dict]) -> pd.DataFrame:
-    """업로드한 보고서에 포함된 학생을 이미 전달 완료된 기준으로 재구성합니다."""
+    """최신 보고서에 포함된 학생을 이번 배부 대상 기준으로 재구성합니다."""
     roster = get_roster_df()
     wrong_df = get_all_wrong_answers()
 
@@ -10503,7 +10503,7 @@ def build_delivered_rows_from_reports(parsed_reports: list[dict]) -> pd.DataFram
                     "문항수": int(row.get("문항수", 0) or 0),
                     "집계시작": start_at,
                     "제출마감": cutoff_at,
-                    "전달상태": "전달완료",
+                    "전달상태": "배부 필요",
                 }
             )
 
@@ -10667,302 +10667,284 @@ def build_next_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.Data
     )
 
 
-def render_report_delivery_management(parsed_reports: list[dict]):
-    """업로드한 보고서는 전달완료 기준, 마감 이후 제출자는 다음 전달 대상으로 보여줍니다."""
-    delivered_df = build_delivered_rows_from_reports(parsed_reports)
-    next_df = build_next_delivery_rows_from_reports(parsed_reports)
 
-    st.markdown("### 📦 보고서 기준 전달 관리")
-    st.caption(
-        "업로드한 PDF에 포함된 학생은 이미 전달 완료된 것으로 보고, "
-        "각 보고서의 제출 마감 이후 새로 오답을 제출한 학생만 다음 전달 대상으로 표시합니다."
+def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
+    """최신 보고서 마감 이후 아직 새 오답을 작성하지 않은 재원생을 찾습니다."""
+    roster = get_roster_df()
+    wrong_df = get_all_wrong_answers()
+
+    columns = [
+        "담당선생님",
+        "반",
+        "학생",
+        "학교",
+        "학년",
+        "최근제출",
+        "기준마감",
+        "상태",
+    ]
+
+    if roster.empty:
+        return pd.DataFrame(columns=columns)
+
+    if wrong_df.empty:
+        wrong_working = pd.DataFrame(
+            columns=["학생", "작성일시"]
+        )
+    else:
+        wrong_working = wrong_df.copy()
+        wrong_working["_dt"] = pd.to_datetime(
+            wrong_working["작성일시"],
+            errors="coerce",
+        )
+        wrong_working = wrong_working[
+            wrong_working["_dt"].notna()
+        ].copy()
+
+    rows = []
+
+    for report in parsed_reports:
+        if not report.get("ok"):
+            continue
+
+        teacher = normalize_teacher_name(report.get("teacher", ""))
+        cutoff_at = report.get("cutoff_at")
+
+        if not teacher or cutoff_at is None:
+            continue
+
+        teacher_roster = roster[
+            roster["담당선생님"].apply(normalize_teacher_name)
+            == teacher
+        ].copy()
+
+        if teacher_roster.empty:
+            continue
+
+        for _, roster_row in teacher_roster.iterrows():
+            student_name = str(
+                roster_row.get("학생명", "") or ""
+            ).strip()
+
+            student_answers = (
+                wrong_working[
+                    wrong_working["학생"].astype(str).str.strip()
+                    == student_name
+                ].copy()
+                if not wrong_working.empty
+                else pd.DataFrame()
+            )
+
+            if student_answers.empty:
+                latest_dt = pd.NaT
+                has_after_cutoff = False
+            else:
+                latest_dt = student_answers["_dt"].max()
+                has_after_cutoff = bool(
+                    (student_answers["_dt"] > cutoff_at).any()
+                )
+
+            if has_after_cutoff:
+                continue
+
+            rows.append(
+                {
+                    "담당선생님": teacher,
+                    "반": str(roster_row.get("반명", "") or "").strip(),
+                    "학생": student_name,
+                    "학교": str(roster_row.get("학교명", "") or "").strip(),
+                    "학년": str(roster_row.get("학년", "") or "").strip(),
+                    "최근제출": latest_dt,
+                    "기준마감": cutoff_at,
+                    "상태": "마감 이후 미작성",
+                }
+            )
+
+    result_df = pd.DataFrame(rows, columns=columns)
+
+    if result_df.empty:
+        return result_df
+
+    return (
+        result_df
+        .sort_values(
+            by=["담당선생님", "반", "학생"],
+            ascending=[True, True, True],
+        )
+        .drop_duplicates(
+            subset=["담당선생님", "반", "학생"],
+            keep="last",
+        )
+        .reset_index(drop=True)
     )
 
-    teacher_count = len(
-        {
-            normalize_teacher_name(report.get("teacher", ""))
-            for report in parsed_reports
-            if report.get("ok") and report.get("teacher")
+
+
+def render_report_delivery_management(parsed_reports: list[dict]):
+    """최신 보고서 기준 배부/다음 전달/미작성 목록을 접힌 목록으로 보여줍니다."""
+    report_df = build_delivered_rows_from_reports(parsed_reports)
+    next_df = build_next_delivery_rows_from_reports(parsed_reports)
+    missing_df = build_missing_after_cutoff_rows(parsed_reports)
+
+    st.markdown(
+        """
+        <style>
+        div[data-testid="stExpander"] details summary p {
+            font-size: 1.12rem !important;
+            font-weight: 750 !important;
         }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.markdown("## 📌 최신 보고서 기준 현황")
+    st.caption(
+        "가장 최근에 저장된 보고서를 기준으로 배부할 학생, "
+        "보고서 이후 새로 제출한 학생, 아직 새 오답을 작성하지 않은 학생을 구분합니다."
+    )
+
+    report_students = (
+        report_df["학생"].nunique()
+        if not report_df.empty
+        else 0
+    )
+    next_students = (
+        next_df["학생"].nunique()
+        if not next_df.empty
+        else 0
+    )
+    missing_students = (
+        missing_df["학생"].nunique()
+        if not missing_df.empty
+        else 0
     )
 
     m1, m2, m3 = st.columns(3)
-    m1.metric(
-        "보고서 전달완료",
-        delivered_df["학생"].nunique() if not delivered_df.empty else 0,
-    )
-    m2.metric(
-        "다음 전달 대기",
-        next_df["학생"].nunique() if not next_df.empty else 0,
-    )
-    m3.metric("선생님", teacher_count)
+    m1.metric("📦 이번 배부 대상", report_students)
+    m2.metric("🟠 다음 전달 대상", next_students)
+    m3.metric("⚪ 마감 이후 미작성", missing_students)
 
     with st.expander(
-        f"✅ 보고서에 포함된 전달완료 학생 · "
-        f"{delivered_df['학생'].nunique() if not delivered_df.empty else 0}명",
+        f"📦 최신 보고서 배부 대상 · {report_students}명",
         expanded=False,
     ):
-        if delivered_df.empty:
-            st.info("보고서 기준 전달완료 학생을 확인하지 못했습니다.")
+        st.caption(
+            "가장 최근 보고서에 들어간 학생입니다. "
+            "현재 오답노트를 배부해야 하는 명단으로 봅니다."
+        )
+
+        if report_df.empty:
+            st.info("최신 보고서에서 배부 대상을 확인하지 못했습니다.")
         else:
-            delivered_display = delivered_df.copy()
-            delivered_display["제출마감"] = pd.to_datetime(
-                delivered_display["제출마감"],
+            report_display = report_df.copy()
+            report_display["제출마감"] = pd.to_datetime(
+                report_display["제출마감"],
                 errors="coerce",
             ).dt.strftime("%m/%d %H:%M")
 
             st.dataframe(
-                delivered_display[
-                    ["담당선생님", "반", "학생", "교재", "문항수", "제출마감", "전달상태"]
+                report_display[
+                    [
+                        "담당선생님",
+                        "반",
+                        "학생",
+                        "교재",
+                        "문항수",
+                        "제출마감",
+                    ]
                 ],
                 use_container_width=True,
                 hide_index=True,
+                height=420,
             )
 
-    st.divider()
-    st.markdown("#### 🟠 다음 전달 대상")
-
-    if next_df.empty:
-        st.success("보고서 마감 이후 새로 제출한 학생이 없습니다.")
-        return
-
-    next_df["추천전달일"] = pd.to_datetime(
-        next_df["추천전달일"],
-        errors="coerce",
-    ).dt.date
-
-    teacher_options = ["전체"] + sorted(
-        next_df["담당선생님"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
-
-    filter_col1, filter_col2 = st.columns(2)
-
-    with filter_col1:
-        selected_teacher = st.selectbox(
-            "선생님 필터",
-            teacher_options,
-            key="next_delivery_teacher",
+    with st.expander(
+        f"🟠 다음 전달 대상 · {next_students}명",
+        expanded=False,
+    ):
+        st.caption(
+            "최신 보고서 마감 이후 오답을 제출했지만, "
+            "아직 그 학생의 오답노트가 다음 보고서에 생성되지 않은 상태입니다."
         )
 
-    filtered = next_df.copy()
-    if selected_teacher != "전체":
-        filtered = filtered[
-            filtered["담당선생님"] == selected_teacher
-        ].copy()
-
-    date_options = sorted(
-        filtered["추천전달일"].dropna().unique().tolist()
-    )
-
-    with filter_col2:
-        selected_date = st.selectbox(
-            "추천 전달일",
-            ["전체"] + date_options,
-            format_func=lambda value: (
-                "전체"
-                if value == "전체"
-                else value.strftime("%m/%d")
-            ),
-            key="next_delivery_date",
-        )
-
-    if selected_date != "전체":
-        filtered = filtered[
-            filtered["추천전달일"] == selected_date
-        ].copy()
-
-    display_df = filtered.copy()
-    display_df["마감후첫제출"] = pd.to_datetime(
-        display_df["마감후첫제출"],
-        errors="coerce",
-    ).dt.strftime("%m/%d %H:%M")
-    display_df["최근제출"] = pd.to_datetime(
-        display_df["최근제출"],
-        errors="coerce",
-    ).dt.strftime("%m/%d %H:%M")
-
-    st.dataframe(
-        display_df[
-            [
-                "담당선생님",
-                "반",
-                "학생",
-                "교재",
-                "문항수",
-                "마감후첫제출",
-                "최근제출",
-                "추천전달일",
-                "전달상태",
-            ]
-        ],
-        use_container_width=True,
-        hide_index=True,
-    )
-
-    st.caption(
-        "이 목록은 PDF 마감 시각 이후 제출된 학생만 잡습니다. "
-        "즉 보고서에 이미 들어간 학생은 다시 대기 목록에 넣지 않습니다."
-    )
-
-
-
-
-def save_submission_report_history(report: dict, uploaded_by: str):
-    """파싱된 PDF 보고서 기준을 Supabase에 저장/갱신합니다."""
-    if not report.get("ok"):
-        return
-
-    teacher = normalize_teacher_name(report.get("teacher", ""))
-    cutoff_at = report.get("cutoff_at")
-
-    if not teacher or cutoff_at is None:
-        return
-
-    payload = {
-        "teacher_name": teacher,
-        "report_filename": str(report.get("filename", "") or ""),
-        "period_start": (
-            report["start_at"].isoformat(timespec="seconds")
-            if report.get("start_at") is not None
-            else None
-        ),
-        "cutoff_at": cutoff_at.isoformat(timespec="seconds"),
-        "target_count": report.get("target_count"),
-        "note_count": report.get("note_count"),
-        "uploaded_at": now_kst_iso(),
-        "uploaded_by": str(uploaded_by or ""),
-    }
-
-    existing = (
-        supabase.table("submission_report_history")
-        .select("id")
-        .eq("teacher_name", teacher)
-        .eq("cutoff_at", payload["cutoff_at"])
-        .limit(1)
-        .execute()
-    )
-
-    if existing.data:
-        (
-            supabase.table("submission_report_history")
-            .update(payload)
-            .eq("id", existing.data[0]["id"])
-            .execute()
-        )
-    else:
-        supabase.table("submission_report_history").insert(payload).execute()
-
-
-def get_saved_submission_reports(
-    teacher_name: str | None = None,
-) -> list[dict]:
-    """Supabase에 저장된 최신 보고서 기준을 선생님별 1건씩 반환합니다."""
-    rows = fetch_all_rows(
-        "submission_report_history",
-        (
-            "id,teacher_name,report_filename,period_start,cutoff_at,"
-            "target_count,note_count,uploaded_at,uploaded_by"
-        ),
-        order_column="cutoff_at",
-        desc=True,
-    )
-
-    if teacher_name and teacher_name != ALL_TEACHER_ADMIN:
-        normalized_teacher = normalize_teacher_name(teacher_name)
-        rows = [
-            row for row in rows
-            if normalize_teacher_name(row.get("teacher_name", ""))
-            == normalized_teacher
-        ]
-
-    latest_by_teacher = {}
-
-    for row in rows:
-        teacher = normalize_teacher_name(row.get("teacher_name", ""))
-        if not teacher or teacher in latest_by_teacher:
-            continue
-
-        start_at = pd.to_datetime(
-            row.get("period_start"),
-            errors="coerce",
-        )
-        cutoff_at = pd.to_datetime(
-            row.get("cutoff_at"),
-            errors="coerce",
-        )
-
-        if pd.isna(cutoff_at):
-            continue
-
-        latest_by_teacher[teacher] = {
-            "filename": row.get("report_filename", ""),
-            "teacher": teacher,
-            "start_at": (
-                start_at.to_pydatetime()
-                if pd.notna(start_at)
-                else None
-            ),
-            "cutoff_at": cutoff_at.to_pydatetime(),
-            "target_count": row.get("target_count"),
-            "note_count": row.get("note_count"),
-            "ok": True,
-            "error": "",
-            "uploaded_at": row.get("uploaded_at", ""),
-            "uploaded_by": row.get("uploaded_by", ""),
-        }
-
-    return list(latest_by_teacher.values())
-
-
-def render_saved_report_delivery_home():
-    """저장된 최신 보고서 기준으로 모든 선생님이 전달 대상을 확인합니다."""
-    current_teacher = st.session_state.teacher_name
-    saved_reports = get_saved_submission_reports(current_teacher)
-
-    st.markdown("### 📦 저장된 보고서 기준 전달 관리")
-
-    if not saved_reports:
-        if current_teacher == ALL_TEACHER_ADMIN:
-            st.info(
-                "아직 저장된 보고서가 없습니다. 위에서 PDF를 업로드하면 "
-                "보고서 기준이 Supabase에 저장됩니다."
-            )
+        if next_df.empty:
+            st.success("현재 다음 전달 대상이 없습니다.")
         else:
-            st.info(
-                "아직 담당 선생님의 저장된 보고서 기준이 없습니다. "
-                "전체 관리자가 PDF 보고서를 업로드하면 여기에서 자동으로 확인할 수 있습니다."
+            next_display = next_df.copy()
+            next_display["마감후첫제출"] = pd.to_datetime(
+                next_display["마감후첫제출"],
+                errors="coerce",
+            ).dt.strftime("%m/%d %H:%M")
+            next_display["최근제출"] = pd.to_datetime(
+                next_display["최근제출"],
+                errors="coerce",
+            ).dt.strftime("%m/%d %H:%M")
+            next_display["추천전달일"] = pd.to_datetime(
+                next_display["추천전달일"],
+                errors="coerce",
+            ).dt.strftime("%m/%d")
+
+            st.dataframe(
+                next_display[
+                    [
+                        "담당선생님",
+                        "반",
+                        "학생",
+                        "교재",
+                        "문항수",
+                        "마감후첫제출",
+                        "최근제출",
+                        "추천전달일",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+                height=420,
             )
-        return
 
-    summary_cols = st.columns(min(len(saved_reports), 3) or 1)
+    with st.expander(
+        f"⚪ 마감 이후 미작성 학생 · {missing_students}명",
+        expanded=False,
+    ):
+        st.caption(
+            "최신 보고서의 제출 마감 이후 아직 새로운 오답을 작성하지 않은 재원생입니다."
+        )
 
-    for idx, report in enumerate(saved_reports):
-        with summary_cols[idx % len(summary_cols)]:
-            st.markdown(f"#### {report['teacher']}")
-            st.metric(
-                "최근 제출 마감",
-                report["cutoff_at"].strftime("%m/%d %H:%M"),
+        if missing_df.empty:
+            st.success("현재 마감 이후 미작성 학생이 없습니다.")
+        else:
+            missing_display = missing_df.copy()
+            missing_display["최근제출"] = pd.to_datetime(
+                missing_display["최근제출"],
+                errors="coerce",
+            ).dt.strftime("%m/%d %H:%M")
+            missing_display["최근제출"] = (
+                missing_display["최근제출"]
+                .fillna("-")
+                .replace("NaT", "-")
             )
-            if report.get("target_count") is not None:
-                st.caption(
-                    f"보고서 대상 {report['target_count']}명"
-                    + (
-                        f" · {report['note_count']}건"
-                        if report.get("note_count") is not None
-                        else ""
-                    )
-                )
+            missing_display["기준마감"] = pd.to_datetime(
+                missing_display["기준마감"],
+                errors="coerce",
+            ).dt.strftime("%m/%d %H:%M")
 
-    st.caption(
-        "전체 관리자가 올린 최신 PDF 기준이 Supabase에 저장되어 "
-        "새로고침하거나 다른 선생님 계정으로 로그인해도 유지됩니다."
-    )
-
-    render_report_delivery_management(saved_reports)
+            st.dataframe(
+                missing_display[
+                    [
+                        "담당선생님",
+                        "반",
+                        "학생",
+                        "학교",
+                        "학년",
+                        "최근제출",
+                        "기준마감",
+                    ]
+                ],
+                use_container_width=True,
+                hide_index=True,
+                height=460,
+            )
 
 
 
