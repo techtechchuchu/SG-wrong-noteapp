@@ -3613,17 +3613,23 @@ def render_weekly_missing_students():
 
 
 def render_daily_submission_counts():
-    """전체 관리자용 선생님별 학생 날짜별 오답 문제 수 화면입니다."""
+    """선생님별 담당 학생의 날짜별 오답 문제 수 화면입니다."""
     current_teacher = st.session_state.teacher_name
 
-    if current_teacher != ALL_TEACHER_ADMIN:
-        st.info("날짜별 제출량은 전체 관리자에서만 확인할 수 있습니다.")
+    if not current_teacher:
+        st.warning("로그인한 선생님 정보가 없습니다. 로그아웃 후 다시 로그인해주세요.")
         return
 
-    st.caption(
-        "담당 선생님별로 학생이 날짜마다 몇 문제를 제출했는지 확인하고, "
-        "학생·날짜를 선택하면 실제 제출한 문제번호까지 볼 수 있습니다."
-    )
+    if current_teacher == ALL_TEACHER_ADMIN:
+        st.caption(
+            "전체 선생님별로 학생이 날짜마다 몇 문제를 제출했는지 확인하고, "
+            "학생·날짜를 선택하면 실제 제출한 문제번호까지 볼 수 있습니다."
+        )
+    else:
+        st.caption(
+            f"{current_teacher} 담당 학생이 날짜마다 몇 문제를 제출했는지 확인하고, "
+            "학생·날짜를 선택하면 실제 제출한 문제번호까지 볼 수 있습니다."
+        )
 
     df = get_all_wrong_answers()
     roster = get_roster_df()
@@ -3734,6 +3740,18 @@ def render_daily_submission_counts():
         "담당선생님",
     ] = "명단 미매칭"
 
+    # 일반 선생님은 본인 담당 학생 기록만 볼 수 있습니다.
+    if current_teacher != ALL_TEACHER_ADMIN:
+        normalized_current_teacher = normalize_teacher_name(current_teacher)
+        working = working[
+            working["담당선생님"].apply(normalize_teacher_name)
+            == normalized_current_teacher
+        ].copy()
+
+        if working.empty:
+            st.info("현재 선생님 담당 학생의 제출 기록이 없습니다.")
+            return
+
     min_date = working["날짜"].min()
     max_date = working["날짜"].max()
     default_start = max(
@@ -3741,22 +3759,25 @@ def render_daily_submission_counts():
         max_date - timedelta(days=13),
     )
 
-    teacher_options = ["전체"] + sorted(
-        working["담당선생님"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
-    )
-
     filter_col1, filter_col2, filter_col3 = st.columns(3)
 
     with filter_col1:
-        selected_teacher = st.selectbox(
-            "담당 선생님",
-            teacher_options,
-            key="daily_submission_teacher_filter",
-        )
+        if current_teacher == ALL_TEACHER_ADMIN:
+            teacher_options = ["전체"] + sorted(
+                working["담당선생님"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+            selected_teacher = st.selectbox(
+                "담당 선생님",
+                teacher_options,
+                key="daily_submission_teacher_filter",
+            )
+        else:
+            selected_teacher = normalize_teacher_name(current_teacher)
+            st.markdown(f"**담당 선생님**  \\n{selected_teacher}")
 
     with filter_col2:
         start_date = st.date_input(
@@ -3985,12 +4006,18 @@ def render_daily_submission_counts():
         ascending=[True, True, False],
     )
 
+    export_owner = (
+        "전체관리자"
+        if current_teacher == ALL_TEACHER_ADMIN
+        else normalize_teacher_name(current_teacher)
+    )
+
     st.download_button(
-        "선생님별 날짜 제출 현황 엑셀 다운로드",
+        "날짜별 제출 현황 엑셀 다운로드",
         data=dataframe_to_excel_bytes(export_df),
         file_name=(
-            f"전체관리자_{start_date.strftime('%Y%m%d')}_"
-            f"{end_date.strftime('%Y%m%d')}_선생님별날짜제출현황.xlsx"
+            f"{export_owner}_{start_date.strftime('%Y%m%d')}_"
+            f"{end_date.strftime('%Y%m%d')}_날짜별제출현황.xlsx"
         ),
         mime=(
             "application/vnd.openxmlformats-officedocument."
