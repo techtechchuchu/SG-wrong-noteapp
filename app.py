@@ -4184,13 +4184,17 @@ def render_teacher_wrong_answer_dashboard():
 
     selected_class = st.selectbox(
         "반 선택",
-        class_options,
+        ["전체"] + class_options,
+        index=0,
         key="answer_dashboard_class",
     )
 
-    class_roster = teacher_roster[
-        teacher_roster["반명"].astype(str) == selected_class
-    ].copy()
+    if selected_class == "전체":
+        class_roster = teacher_roster.copy()
+    else:
+        class_roster = teacher_roster[
+            teacher_roster["반명"].astype(str) == selected_class
+        ].copy()
 
     class_students = sorted(
         class_roster["학생명"]
@@ -4277,8 +4281,9 @@ def render_teacher_wrong_answer_dashboard():
     col4.metric("오늘 문제 수", today_problem_count)
     col5.metric("변형 요청", variant_request_students)
 
+    scope_label = "전체 반" if selected_class == "전체" else selected_class
     st.caption(
-        f"{selected_class} · 학생 이름을 펼치면 최근 제출 문제번호를 바로 확인할 수 있습니다."
+        f"{scope_label} · 학생 이름을 펼치면 최근 제출 문제번호를 바로 확인할 수 있습니다."
     )
 
     with st.expander(
