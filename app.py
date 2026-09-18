@@ -1271,23 +1271,27 @@ def normalize_roster_grade(value) -> str:
     return raw
 
 
-def get_roster_df() -> pd.DataFrame:
+def get_roster_df(include_exited: bool = False) -> pd.DataFrame:
     rows = fetch_all_rows(
         "student_roster",
-        "id,class_name,teacher_name,student_name,school_name,grade,book_name,created_at",
+        (
+            "id,class_name,teacher_name,student_name,school_name,grade,"
+            "book_name,created_at,enrollment_status,exited_at,status_note"
+        ),
         order_column="teacher_name",
         desc=False,
     )
 
-    if not rows:
-        return pd.DataFrame(
-            columns=[
-                "기록ID", "반명", "담당선생님", "학생명",
-                "학교명", "학년", "매칭교재", "등록일시"
-            ]
-        )
+    columns = [
+        "기록ID", "반명", "담당선생님", "학생명",
+        "학교명", "학년", "매칭교재", "등록일시",
+        "재원상태", "퇴원일시", "상태메모",
+    ]
 
-    return pd.DataFrame(
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    df = pd.DataFrame(
         [
             {
                 "기록ID": row.get("id"),
@@ -1300,10 +1304,19 @@ def get_roster_df() -> pd.DataFrame:
                 "학년": row.get("grade", ""),
                 "매칭교재": row.get("book_name", ""),
                 "등록일시": row.get("created_at", ""),
+                "재원상태": row.get("enrollment_status", "재원") or "재원",
+                "퇴원일시": row.get("exited_at", ""),
+                "상태메모": row.get("status_note", ""),
             }
             for row in rows
-        ]
+        ],
+        columns=columns,
     )
+
+    if not include_exited:
+        df = df[df["재원상태"].astype(str) != "퇴원"].copy()
+
+    return df.reset_index(drop=True)
 
 
 def import_roster_from_excel(uploaded_file) -> dict:
@@ -1347,6 +1360,7 @@ def import_roster_from_excel(uploaded_file) -> dict:
             "grade": row["학년"],
             "book_name": row["매칭교재"],
             "created_at": now_kst_iso(),
+            "enrollment_status": "재원",
         }
         for _, row in clean_df.iterrows()
     ]
@@ -5109,6 +5123,391 @@ def render_sg_ai_counselor(
         st.session_state[context_key].append(
             {"role": "assistant", "content": answer}
         )
+
+
+
+def render_teacher_new_student_registration():
+    """선생님이 직접 신규 재원생을 명단에 등록합니다."""
+    current_teacher = st.session_state.teacher_name
+    roster_all = get_roster_df(include_exited=True)
+
+    st.markdown("### ➕ 신규생 등록")
+    st.caption(
+        "학생 이름이 같아도 등록할 수 있습니다. "
+        "동명이인은 학교·학년·반 정보를 함께 확인해주세요."
+    )
+
+    if current_teacher == ALL_TEACHER_ADMIN:
+        teacher_name = st.selectbox(
+            "담당 선생님",
+            TEACHERS,
+            key="new_student_teacher",
+        )
+    else:
+        teacher_name = normalize_teacher_name(current_teacher)
+        st.markdown(f"**담당 선생님:** {teacher_name}")
+
+    teacher_roster = (
+        roster_all[
+            roster_all["담당선생님"].apply(normalize_teacher_name)
+            == teacher_name
+        ].copy()
+        if not roster_all.empty
+        else pd.DataFrame()
+    )
+
+    existing_classes = sorted(
+        teacher_roster["반명"]
+        .dropna()
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .unique()
+        .tolist()
+    ) if not teacher_roster.empty else []
+
+    col1, col2 = st.columns(2)
+    with col1:
+        student_name = st.text_input(
+            "학생 이름",
+            key="new_student_name",
+            placeholder="예: 김민수",
+        ).strip()
+        school_name = st.text_input(
+            "학교",
+            key="new_student_school",
+            placeholder="예: 울산고",
+        ).strip()
+
+    with col2:
+        grade = st.selectbox(
+            "학년",
+            GRADES,
+            key="new_student_grade",
+        )
+        class_mode = st.selectbox(
+            "반",
+            existing_classes + ["➕ 새 반 직접 입력"],
+            index=(len(existing_classes) if existing_classes else 0),
+            key="new_student_class_mode",
+        )
+
+    if class_mode == "➕ 새 반 직접 입력":
+        class_name = st.text_input(
+            "새 반 이름",
+            key="new_student_class_name",
+            placeholder="예: 월금일 고1 드릴반",
+        ).strip()
+    else:
+        class_name = class_mode
+
+    active_books = get_active_book_names()
+    selected_books = st.multiselect(
+        "교재",
+        active_books,
+        key="new_student_books",
+        placeholder="학생이 사용하는 교재를 선택하세요.",
+    )
+
+    if student_name and not roster_all.empty:
+        duplicate_rows = roster_all[
+            roster_all["학생명"].astype(str).str.strip() == student_name
+        ].copy()
+
+        if not duplicate_rows.empty:
+            st.warning(
+                f"'{student_name}' 이름으로 등록된 학생/이력이 "
+                f"{len(duplicate_rows)}건 있습니다. 동명이인이면 그대로 등록할 수 있습니다."
+            )
+            st.dataframe(
+                duplicate_rows[
+                    ["학생명", "학교명", "학년", "반명", "담당선생님", "재원상태"]
+                ],
+                use_container_width=True,
+                hide_index=True,
+            )
+
+    register_confirm = st.checkbox(
+        "위 정보를 확인했고 신규 재원생으로 등록합니다.",
+        key="new_student_confirm",
+    )
+
+    if st.button(
+        "신규생 등록",
+        type="primary",
+        use_container_width=True,
+        key="new_student_register_button",
+    ):
+        if not student_name:
+            st.warning("학생 이름을 입력해주세요.")
+        elif not class_name:
+            st.warning("반을 선택하거나 새 반 이름을 입력해주세요.")
+        elif not selected_books:
+            st.warning("교재를 한 개 이상 선택해주세요.")
+        elif not register_confirm:
+            st.warning("등록 확인 항목에 체크해주세요.")
+        else:
+            try:
+                supabase.table("student_roster").insert(
+                    {
+                        "class_name": class_name,
+                        "teacher_name": teacher_name,
+                        "student_name": student_name,
+                        "school_name": school_name,
+                        "grade": grade,
+                        "book_name": ", ".join(selected_books),
+                        "created_at": now_kst_iso(),
+                        "enrollment_status": "재원",
+                        "exited_at": None,
+                        "status_note": "",
+                    }
+                ).execute()
+                st.success(
+                    f"{student_name} 학생을 {teacher_name} · {class_name}에 등록했습니다."
+                )
+                st.info(
+                    "학생 로그인 계정은 기존 회원가입 절차를 사용합니다. "
+                    "동명이인 계정 로그인 체계는 별도 개선이 필요할 수 있습니다."
+                )
+                st.rerun()
+            except Exception as error:
+                st.error(f"신규생 등록 중 오류가 발생했습니다: {error}")
+
+
+def render_teacher_exited_student_management():
+    """선생님이 담당 학생의 퇴원 처리와 재등록을 관리합니다."""
+    current_teacher = st.session_state.teacher_name
+    roster_all = get_roster_df(include_exited=True)
+
+    st.markdown("### 🚪 퇴원생 관리")
+    st.caption(
+        "퇴원 처리해도 기존 오답 기록은 삭제하지 않습니다. "
+        "재등록 시 과거 이력은 그대로 두고 새 재원 등록을 추가합니다."
+    )
+
+    if roster_all.empty:
+        st.info("등록된 학생 명단이 없습니다.")
+        return
+
+    if current_teacher == ALL_TEACHER_ADMIN:
+        teacher_options = ["전체"] + sorted(
+            roster_all["담당선생님"]
+            .dropna()
+            .astype(str)
+            .map(normalize_teacher_name)
+            .unique()
+            .tolist()
+        )
+        selected_teacher = st.selectbox(
+            "담당 선생님",
+            teacher_options,
+            key="exit_manage_teacher",
+        )
+        scoped = roster_all.copy()
+        if selected_teacher != "전체":
+            scoped = scoped[
+                scoped["담당선생님"].apply(normalize_teacher_name)
+                == selected_teacher
+            ].copy()
+    else:
+        selected_teacher = normalize_teacher_name(current_teacher)
+        scoped = roster_all[
+            roster_all["담당선생님"].apply(normalize_teacher_name)
+            == selected_teacher
+        ].copy()
+        st.markdown(f"**담당 선생님:** {selected_teacher}")
+
+    active_df = scoped[
+        scoped["재원상태"].astype(str) != "퇴원"
+    ].copy()
+    exited_df = scoped[
+        scoped["재원상태"].astype(str) == "퇴원"
+    ].copy()
+
+    m1, m2 = st.columns(2)
+    m1.metric("재원생", active_df["학생명"].nunique() if not active_df.empty else 0)
+    m2.metric("퇴원생", exited_df["학생명"].nunique() if not exited_df.empty else 0)
+
+    exit_tab, reenter_tab = st.tabs(["🚪 퇴원 처리", "↩ 재등록"])
+
+    with exit_tab:
+        if active_df.empty:
+            st.info("퇴원 처리할 재원생이 없습니다.")
+        else:
+            active_df = active_df.copy()
+            active_df["_label"] = active_df.apply(
+                lambda row: (
+                    f"{row['학생명']} · {row['학교명'] or '-'} · {row['학년']} · "
+                    f"{row['반명']}"
+                ),
+                axis=1,
+            )
+            selected_id = st.selectbox(
+                "퇴원 처리할 학생",
+                active_df["기록ID"].tolist(),
+                format_func=lambda rid: active_df.loc[
+                    active_df["기록ID"] == rid, "_label"
+                ].iloc[0],
+                key="exit_student_id",
+            )
+            selected_row = active_df[
+                active_df["기록ID"] == selected_id
+            ].iloc[0]
+
+            exit_note = st.text_input(
+                "퇴원 메모 (선택)",
+                key="exit_student_note",
+                placeholder="예: 9월 퇴원",
+            )
+            confirm_exit = st.checkbox(
+                f"{selected_row['학생명']} 학생을 퇴원 처리합니다.",
+                key="exit_student_confirm",
+            )
+
+            if st.button(
+                "퇴원 처리",
+                type="primary",
+                use_container_width=True,
+                key="exit_student_button",
+            ):
+                if not confirm_exit:
+                    st.warning("퇴원 처리 확인 항목에 체크해주세요.")
+                else:
+                    try:
+                        (
+                            supabase.table("student_roster")
+                            .update(
+                                {
+                                    "enrollment_status": "퇴원",
+                                    "exited_at": now_kst_iso(),
+                                    "status_note": exit_note.strip(),
+                                }
+                            )
+                            .eq("id", int(selected_id))
+                            .execute()
+                        )
+                        st.success(
+                            f"{selected_row['학생명']} 학생을 퇴원 처리했습니다. "
+                            "기존 오답 기록은 유지됩니다."
+                        )
+                        st.rerun()
+                    except Exception as error:
+                        st.error(f"퇴원 처리 중 오류가 발생했습니다: {error}")
+
+    with reenter_tab:
+        if exited_df.empty:
+            st.info("재등록할 퇴원생이 없습니다.")
+        else:
+            exited_df = exited_df.copy()
+            exited_df["_label"] = exited_df.apply(
+                lambda row: (
+                    f"{row['학생명']} · {row['학교명'] or '-'} · {row['학년']} · "
+                    f"이전 {row['반명']}"
+                ),
+                axis=1,
+            )
+            selected_exit_id = st.selectbox(
+                "재등록할 학생",
+                exited_df["기록ID"].tolist(),
+                format_func=lambda rid: exited_df.loc[
+                    exited_df["기록ID"] == rid, "_label"
+                ].iloc[0],
+                key="reenter_student_id",
+            )
+            old_row = exited_df[
+                exited_df["기록ID"] == selected_exit_id
+            ].iloc[0]
+
+            if current_teacher == ALL_TEACHER_ADMIN:
+                new_teacher = st.selectbox(
+                    "새 담당 선생님",
+                    TEACHERS,
+                    index=(TEACHERS.index(normalize_teacher_name(old_row["담당선생님"]))
+                           if normalize_teacher_name(old_row["담당선생님"]) in TEACHERS else 0),
+                    key="reenter_teacher",
+                )
+            else:
+                new_teacher = normalize_teacher_name(current_teacher)
+
+            new_class = st.text_input(
+                "새 반",
+                value=str(old_row["반명"] or ""),
+                key="reenter_class",
+            ).strip()
+            new_school = st.text_input(
+                "학교",
+                value=str(old_row["학교명"] or ""),
+                key="reenter_school",
+            ).strip()
+            new_grade = st.selectbox(
+                "학년",
+                GRADES,
+                index=(GRADES.index(str(old_row["학년"])) if str(old_row["학년"]) in GRADES else 0),
+                key="reenter_grade",
+            )
+            new_books = st.multiselect(
+                "교재",
+                get_active_book_names(),
+                default=[
+                    book for book in split_roster_books(old_row["매칭교재"])
+                    if book in get_active_book_names()
+                ],
+                key="reenter_books",
+            )
+
+            if st.button(
+                "재등록",
+                type="primary",
+                use_container_width=True,
+                key="reenter_student_button",
+            ):
+                if not new_class:
+                    st.warning("새 반을 입력해주세요.")
+                elif not new_books:
+                    st.warning("교재를 한 개 이상 선택해주세요.")
+                else:
+                    try:
+                        supabase.table("student_roster").insert(
+                            {
+                                "class_name": new_class,
+                                "teacher_name": new_teacher,
+                                "student_name": str(old_row["학생명"]),
+                                "school_name": new_school,
+                                "grade": new_grade,
+                                "book_name": ", ".join(new_books),
+                                "created_at": now_kst_iso(),
+                                "enrollment_status": "재원",
+                                "exited_at": None,
+                                "status_note": f"재등록 · 이전 기록ID {int(selected_exit_id)}",
+                            }
+                        ).execute()
+                        st.success(
+                            f"{old_row['학생명']} 학생을 새 재원생으로 재등록했습니다."
+                        )
+                        st.rerun()
+                    except Exception as error:
+                        st.error(f"재등록 중 오류가 발생했습니다: {error}")
+
+    st.divider()
+    st.markdown("#### 퇴원생 목록")
+
+    if exited_df.empty:
+        st.info("등록된 퇴원생이 없습니다.")
+    else:
+        display_exited = exited_df[
+            [
+                "학생명", "학교명", "학년", "반명",
+                "담당선생님", "매칭교재", "퇴원일시", "상태메모",
+            ]
+        ].copy()
+        st.dataframe(
+            display_exited,
+            use_container_width=True,
+            hide_index=True,
+            height=430,
+        )
+
 
 
 def render_student_detail_view():
@@ -10703,13 +11102,17 @@ def show_admin():
     with tab_student_group:
         (
             tab_student_detail,
-            tab_signup_status,
+            tab_new_student,
             tab_teacher_students,
+            tab_exited_students,
+            tab_signup_status,
         ) = st.tabs(
             [
                 "👤 학생 상세",
-                "🔐 가입 현황",
+                "➕ 신규생 등록",
                 "🏫 반 학생",
+                "🚪 퇴원생 관리",
+                "🔐 가입 현황",
             ]
         )
 
@@ -10750,6 +11153,12 @@ def show_admin():
 
     with tab_student_detail:
         render_student_detail_view()
+
+    with tab_new_student:
+        render_teacher_new_student_registration()
+
+    with tab_exited_students:
+        render_teacher_exited_student_management()
 
     with tab_wrong_home:
         render_wrong_answer_management_home()
