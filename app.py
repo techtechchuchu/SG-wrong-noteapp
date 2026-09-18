@@ -9606,37 +9606,21 @@ def show_admin():
         )
 
     with tab_wrong_group:
-        if st.session_state.teacher_name == ALL_TEACHER_ADMIN:
-            (
-                tab_answers,
-                tab_weekly_submission,
-                tab_daily_submission,
-                tab_school_exam,
-                tab_weekly_missing,
-            ) = st.tabs(
-                [
-                    "📋 전체 오답",
-                    "📅 주간 제출",
-                    "📆 날짜별 제출량",
-                    "🏫 학교 기출",
-                    "🚨 미제출",
-                ]
-            )
-        else:
-            (
-                tab_answers,
-                tab_weekly_submission,
-                tab_school_exam,
-                tab_weekly_missing,
-            ) = st.tabs(
-                [
-                    "📋 전체 오답",
-                    "📅 주간 제출",
-                    "🏫 학교 기출",
-                    "🚨 미제출",
-                ]
-            )
-            tab_daily_submission = None
+        (
+            tab_answers,
+            tab_weekly_submission,
+            tab_daily_submission,
+            tab_school_exam,
+            tab_weekly_missing,
+        ) = st.tabs(
+            [
+                "📋 전체 오답",
+                "📅 주간 제출",
+                "📆 날짜별 제출량",
+                "🏫 학교 기출",
+                "🚨 미제출",
+            ]
+        )
 
     with tab_output_group:
         (
@@ -9658,9 +9642,8 @@ def show_admin():
     with tab_weekly_submission:
         render_weekly_submission_status()
 
-    if tab_daily_submission is not None:
-        with tab_daily_submission:
-            render_daily_submission_counts()
+    with tab_daily_submission:
+        render_daily_submission_counts()
 
     with tab_school_exam:
         render_teacher_school_exam_management()
