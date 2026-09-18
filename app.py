@@ -10948,6 +10948,160 @@ def render_report_delivery_management(parsed_reports: list[dict]):
 
 
 
+
+def save_submission_report_history(report: dict, uploaded_by: str):
+    """파싱된 PDF 보고서 기준을 Supabase에 저장하거나 갱신합니다."""
+    if not report.get("ok"):
+        return
+
+    teacher = normalize_teacher_name(report.get("teacher", ""))
+    cutoff_at = report.get("cutoff_at")
+
+    if not teacher or cutoff_at is None:
+        return
+
+    payload = {
+        "teacher_name": teacher,
+        "report_filename": str(report.get("filename", "") or ""),
+        "period_start": (
+            report["start_at"].isoformat(timespec="seconds")
+            if report.get("start_at") is not None
+            else None
+        ),
+        "cutoff_at": cutoff_at.isoformat(timespec="seconds"),
+        "target_count": report.get("target_count"),
+        "note_count": report.get("note_count"),
+        "uploaded_at": now_kst_iso(),
+        "uploaded_by": str(uploaded_by or ""),
+    }
+
+    existing = (
+        supabase.table("submission_report_history")
+        .select("id")
+        .eq("teacher_name", teacher)
+        .eq("cutoff_at", payload["cutoff_at"])
+        .limit(1)
+        .execute()
+    )
+
+    if existing.data:
+        (
+            supabase.table("submission_report_history")
+            .update(payload)
+            .eq("id", existing.data[0]["id"])
+            .execute()
+        )
+    else:
+        supabase.table("submission_report_history").insert(payload).execute()
+
+
+def get_saved_submission_reports(
+    teacher_name: str | None = None,
+) -> list[dict]:
+    """Supabase에 저장된 선생님별 최신 보고서 기준을 반환합니다."""
+    rows = fetch_all_rows(
+        "submission_report_history",
+        (
+            "id,teacher_name,report_filename,period_start,cutoff_at,"
+            "target_count,note_count,uploaded_at,uploaded_by"
+        ),
+        order_column="cutoff_at",
+        desc=True,
+    )
+
+    if teacher_name and teacher_name != ALL_TEACHER_ADMIN:
+        normalized_teacher = normalize_teacher_name(teacher_name)
+        rows = [
+            row for row in rows
+            if normalize_teacher_name(row.get("teacher_name", ""))
+            == normalized_teacher
+        ]
+
+    latest_by_teacher = {}
+
+    for row in rows:
+        teacher = normalize_teacher_name(row.get("teacher_name", ""))
+
+        if not teacher or teacher in latest_by_teacher:
+            continue
+
+        start_at = pd.to_datetime(
+            row.get("period_start"),
+            errors="coerce",
+        )
+        cutoff_at = pd.to_datetime(
+            row.get("cutoff_at"),
+            errors="coerce",
+        )
+
+        if pd.isna(cutoff_at):
+            continue
+
+        latest_by_teacher[teacher] = {
+            "filename": row.get("report_filename", ""),
+            "teacher": teacher,
+            "start_at": (
+                start_at.to_pydatetime()
+                if pd.notna(start_at)
+                else None
+            ),
+            "cutoff_at": cutoff_at.to_pydatetime(),
+            "target_count": row.get("target_count"),
+            "note_count": row.get("note_count"),
+            "ok": True,
+            "error": "",
+            "uploaded_at": row.get("uploaded_at", ""),
+            "uploaded_by": row.get("uploaded_by", ""),
+        }
+
+    return list(latest_by_teacher.values())
+
+
+def render_saved_report_delivery_home():
+    """저장된 최신 보고서를 바탕으로 홈의 최신 보고서 현황을 표시합니다."""
+    current_teacher = st.session_state.teacher_name
+    saved_reports = get_saved_submission_reports(current_teacher)
+
+    st.markdown("### 📄 최신 저장 보고서")
+
+    if not saved_reports:
+        if current_teacher == ALL_TEACHER_ADMIN:
+            st.info(
+                "아직 저장된 보고서가 없습니다. PDF를 업로드하면 "
+                "최신 보고서 기준이 Supabase에 저장됩니다."
+            )
+        else:
+            st.info(
+                "아직 담당 선생님의 저장된 보고서가 없습니다. "
+                "전체 관리자가 PDF를 업로드하면 자동으로 표시됩니다."
+            )
+        return
+
+    cards = st.columns(min(len(saved_reports), 3) or 1)
+
+    for idx, report in enumerate(saved_reports):
+        with cards[idx % len(cards)]:
+            st.markdown(f"#### {report['teacher']}")
+            st.metric(
+                "최근 제출 마감",
+                report["cutoff_at"].strftime("%m/%d %H:%M"),
+            )
+
+            if report.get("target_count") is not None:
+                st.caption(
+                    f"보고서 대상 {report['target_count']}명"
+                    + (
+                        f" · {report['note_count']}건"
+                        if report.get("note_count") is not None
+                        else ""
+                    )
+                )
+
+    st.divider()
+    render_report_delivery_management(saved_reports)
+
+
+
 def render_submission_report_uploader():
     """PDF 오답명단을 올리면 제출 반영 마감 시각을 즉시 보여줍니다."""
     st.markdown("### 📄 오답명단 PDF 집계 기준")
