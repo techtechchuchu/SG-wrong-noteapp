@@ -1192,29 +1192,61 @@ def fetch_all_rows(
     filters: list[tuple[str, str, object]] | None = None,
     order_column: str | None = None,
     desc: bool = False,
-    page_size: int = 1000
+    page_size: int = 1000,
+    max_retries: int = 3,
 ) -> list[dict]:
-    """PostgREST 행 제한을 고려하여 전체 데이터를 페이지 단위로 가져옵니다."""
+    """PostgREST 전체 조회. 일시적인 HTTP 연결 종료는 자동 재시도합니다."""
     all_rows: list[dict] = []
     start = 0
 
     while True:
-        query = supabase.table(table_name).select(columns)
+        last_error = None
+        response = None
 
-        for column, operation, value in filters or []:
-            if operation == "eq":
-                query = query.eq(column, value)
-            elif operation == "neq":
-                query = query.neq(column, value)
-            elif operation == "in":
-                query = query.in_(column, value)
-            else:
-                raise ValueError(f"지원하지 않는 필터 연산입니다: {operation}")
+        for attempt in range(max_retries):
+            try:
+                # 재시도마다 query 객체를 새로 만들어 끊어진 HTTP 연결 상태를 재사용하지 않습니다.
+                query = supabase.table(table_name).select(columns)
 
-        if order_column:
-            query = query.order(order_column, desc=desc)
+                for column, operation, value in filters or []:
+                    if operation == "eq":
+                        query = query.eq(column, value)
+                    elif operation == "neq":
+                        query = query.neq(column, value)
+                    elif operation == "in":
+                        query = query.in_(column, value)
+                    else:
+                        raise ValueError(
+                            f"지원하지 않는 필터 연산입니다: {operation}"
+                        )
 
-        response = query.range(start, start + page_size - 1).execute()
+                if order_column:
+                    query = query.order(order_column, desc=desc)
+
+                response = query.range(
+                    start,
+                    start + page_size - 1,
+                ).execute()
+                last_error = None
+                break
+
+            except Exception as error:
+                last_error = error
+
+                if attempt < max_retries - 1:
+                    # RemoteProtocolError / connection reset 등 일시 오류에 대비한 짧은 backoff
+                    time.sleep(0.6 * (2 ** attempt))
+
+        if last_error is not None or response is None:
+            st.error(
+                "Supabase와 통신이 잠시 끊겼습니다. "
+                "잠시 후 새로고침해주세요."
+            )
+            st.caption(
+                "같은 오류가 계속되면 Streamlit 앱을 재부팅한 뒤 다시 확인해주세요."
+            )
+            st.stop()
+
         rows = response.data or []
         all_rows.extend(rows)
 
