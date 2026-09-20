@@ -11942,7 +11942,12 @@ def show_admin():
         )
 
         if st.button("로그인", key="teacher_login_button"):
-            if selected_teacher_login == ALL_TEACHER_ADMIN:
+            if selected_teacher_login == "박병민.T":
+                st.warning(
+                    "🚧 박병민.T 선생님 계정은 현재 점검 중입니다. "
+                    "점검이 완료된 뒤 다시 이용해주세요."
+                )
+            elif selected_teacher_login == ALL_TEACHER_ADMIN:
                 if SUPERADMIN_PASSWORD is None:
                     st.error("전체 관리자 비밀번호가 설정되지 않았습니다.")
                 elif pw == SUPERADMIN_PASSWORD:
