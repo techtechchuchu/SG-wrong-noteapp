@@ -11944,8 +11944,8 @@ def show_admin():
         if st.button("로그인", key="teacher_login_button"):
             if selected_teacher_login == "박병민.T":
                 st.warning(
-                    "🚧 박병민.T 선생님 계정은 현재 점검 중입니다. "
-                    "점검이 완료된 뒤 다시 이용해주세요."
+                    "🚧 박병민.T 담당 학생만 현재 점검 중이기에 "
+                    "원활한 이용이 불가능합니다."
                 )
             elif selected_teacher_login == ALL_TEACHER_ADMIN:
                 if SUPERADMIN_PASSWORD is None:
