@@ -9724,6 +9724,31 @@ def show_role_select():
     )
 
 
+def is_park_byungmin_student(username: str) -> bool:
+    """현재 재원 명단 기준 박병민.T 담당 학생인지 확인합니다."""
+    student_name = str(username or "").strip()
+    if not student_name:
+        return False
+
+    roster = get_roster_df()
+    if roster.empty:
+        return False
+
+    matched = roster[
+        roster["학생명"].astype(str).str.strip() == student_name
+    ].copy()
+
+    if matched.empty:
+        return False
+
+    return bool(
+        matched["담당선생님"]
+        .apply(normalize_teacher_name)
+        .eq("박병민.T")
+        .any()
+    )
+
+
 # ---------------------- 학생 화면 ----------------------
 def show_student():
     if st.session_state.student_user is None:
@@ -9741,13 +9766,21 @@ def show_student():
             password = st.text_input("비밀번호", type="password", key="login_pw")
 
             if st.button("로그인"):
-                if check_user(username.strip(), password):
-                    st.session_state.student_user = username.strip()
-                    set_persistent_session(
-                        "student",
-                        student_user=username.strip(),
-                    )
-                    st.rerun()
+                login_name = username.strip()
+
+                if check_user(login_name, password):
+                    if is_park_byungmin_student(login_name):
+                        st.warning(
+                            "🚧 박병민.T 담당 학생은 현재 점검 중이기에 "
+                            "원활한 이용이 불가능합니다."
+                        )
+                    else:
+                        st.session_state.student_user = login_name
+                        set_persistent_session(
+                            "student",
+                            student_user=login_name,
+                        )
+                        st.rerun()
                 else:
                     st.error("학생 또는 비밀번호가 올바르지 않습니다.")
 
@@ -11942,12 +11975,7 @@ def show_admin():
         )
 
         if st.button("로그인", key="teacher_login_button"):
-            if selected_teacher_login == "박병민.T":
-                st.warning(
-                    "🚧 박병민.T 담당 학생만 현재 점검 중이기에 "
-                    "원활한 이용이 불가능합니다."
-                )
-            elif selected_teacher_login == ALL_TEACHER_ADMIN:
+            if selected_teacher_login == ALL_TEACHER_ADMIN:
                 if SUPERADMIN_PASSWORD is None:
                     st.error("전체 관리자 비밀번호가 설정되지 않았습니다.")
                 elif pw == SUPERADMIN_PASSWORD:
