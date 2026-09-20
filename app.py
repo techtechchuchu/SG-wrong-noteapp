@@ -7,7 +7,9 @@ import html
 import json
 import urllib.request
 import urllib.error
+import urllib.parse
 import time
+import zipfile
 from collections import Counter
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -11387,6 +11389,452 @@ def render_wrong_answer_management_home():
 
 
 
+
+WRONG_NOTE_STORAGE_BUCKET = "wrong-note-pdfs"
+
+
+def _safe_storage_segment(value: str) -> str:
+    raw = str(value or "").strip()
+    raw = re.sub(r"[^0-9A-Za-z가-힣._-]+", "_", raw)
+    return raw.strip("._") or "unknown"
+
+
+def upload_wrong_note_pdf_to_storage(
+    pdf_bytes: bytes,
+    storage_path: str,
+):
+    """Supabase Storage private bucket에 PDF를 업로드합니다."""
+    encoded_path = "/".join(
+        urllib.parse.quote(segment, safe="")
+        for segment in storage_path.split("/")
+    )
+    url = (
+        f"{SUPABASE_URL}/storage/v1/object/"
+        f"{WRONG_NOTE_STORAGE_BUCKET}/{encoded_path}"
+    )
+
+    request = urllib.request.Request(
+        url,
+        data=pdf_bytes,
+        headers={
+            "Authorization": f"Bearer {SUPABASE_KEY}",
+            "apikey": SUPABASE_KEY,
+            "Content-Type": "application/pdf",
+            "x-upsert": "true",
+        },
+        method="POST",
+    )
+
+    with urllib.request.urlopen(request, timeout=60) as response:
+        return response.read().decode("utf-8")
+
+
+def get_wrong_note_pdf_metadata() -> pd.DataFrame:
+    rows = fetch_all_rows(
+        "wrong_note_files",
+        (
+            "id,student_roster_id,student_name,teacher_name,class_name,"
+            "original_filename,storage_path,content_sha256,uploaded_at,uploaded_by"
+        ),
+        order_column="uploaded_at",
+        desc=True,
+    )
+
+    columns = [
+        "ID", "학생", "담당선생님", "반", "파일명",
+        "저장경로", "업로드일시", "업로더",
+    ]
+
+    if not rows:
+        return pd.DataFrame(columns=columns)
+
+    return pd.DataFrame(
+        [
+            {
+                "ID": row.get("id"),
+                "학생": row.get("student_name", ""),
+                "담당선생님": row.get("teacher_name", ""),
+                "반": row.get("class_name", ""),
+                "파일명": row.get("original_filename", ""),
+                "저장경로": row.get("storage_path", ""),
+                "업로드일시": row.get("uploaded_at", ""),
+                "업로더": row.get("uploaded_by", ""),
+            }
+            for row in rows
+        ],
+        columns=columns,
+    )
+
+
+def _build_unique_roster_profiles() -> pd.DataFrame:
+    roster = get_roster_df(include_exited=True)
+
+    if roster.empty:
+        return pd.DataFrame(
+            columns=[
+                "기록ID", "학생명", "학교명", "학년",
+                "반명", "담당선생님", "재원상태",
+            ]
+        )
+
+    profiles = roster[
+        [
+            "기록ID", "학생명", "학교명", "학년",
+            "반명", "담당선생님", "재원상태",
+        ]
+    ].copy()
+
+    profiles["학생명"] = profiles["학생명"].fillna("").astype(str).str.strip()
+    profiles = profiles[profiles["학생명"] != ""].copy()
+
+    return profiles.drop_duplicates(
+        subset=[
+            "학생명", "학교명", "학년",
+            "반명", "담당선생님", "재원상태",
+        ]
+    ).reset_index(drop=True)
+
+
+def _match_pdf_filename_to_roster(
+    filename: str,
+    profiles: pd.DataFrame,
+):
+    """파일명 안의 학생명을 기준으로 재원생 후보를 찾습니다."""
+    stem = Path(filename).stem
+    if profiles.empty:
+        return []
+
+    exact_candidates = profiles[
+        profiles["학생명"].apply(
+            lambda name: bool(name) and str(name) in stem
+        )
+    ].copy()
+
+    if exact_candidates.empty:
+        return []
+
+    # 가장 긴 이름을 우선해 부분문자열 오매칭을 줄입니다.
+    max_len = exact_candidates["학생명"].astype(str).str.len().max()
+    exact_candidates = exact_candidates[
+        exact_candidates["학생명"].astype(str).str.len() == max_len
+    ].copy()
+
+    return exact_candidates.to_dict("records")
+
+
+def render_wrong_note_zip_uploader():
+    """전체 관리자가 ZIP 안의 학생별 오답노트 PDF를 일괄 등록합니다."""
+    st.markdown("### 📦 오답노트 PDF 일괄 업로드")
+    st.caption(
+        "컴퓨터의 '일괄출력' 폴더를 ZIP으로 압축해 올리면 "
+        "PDF 파일명에서 학생 이름을 찾아 자동 매칭합니다."
+    )
+
+    if st.session_state.teacher_name != ALL_TEACHER_ADMIN:
+        st.info("PDF 일괄 업로드는 전체 관리자만 사용할 수 있습니다.")
+        return
+
+    zip_file = st.file_uploader(
+        "일괄출력 ZIP 업로드",
+        type=["zip"],
+        key="wrong_note_zip_uploader",
+        help="ZIP 안에는 학생별 PDF 파일만 넣는 것을 권장합니다.",
+    )
+
+    if zip_file is None:
+        st.info(
+            "예: 김민수_오답노트.pdf, 박서영_오답노트.pdf가 들어있는 "
+            "일괄출력 폴더를 ZIP으로 압축한 뒤 업로드하세요."
+        )
+        return
+
+    try:
+        zip_bytes = zip_file.getvalue()
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as archive:
+            pdf_infos = [
+                info
+                for info in archive.infolist()
+                if not info.is_dir()
+                and info.filename.lower().endswith(".pdf")
+                and "__MACOSX" not in info.filename
+            ]
+
+            if not pdf_infos:
+                st.warning("ZIP 안에서 PDF 파일을 찾지 못했습니다.")
+                return
+
+            if len(pdf_infos) > 500:
+                st.error("한 번에 최대 500개의 PDF만 업로드할 수 있습니다.")
+                return
+
+            total_uncompressed = sum(info.file_size for info in pdf_infos)
+            if total_uncompressed > 500 * 1024 * 1024:
+                st.error("압축 해제 기준 전체 PDF 용량이 500MB를 초과합니다.")
+                return
+
+            profiles = _build_unique_roster_profiles()
+
+            matched_items = []
+            ambiguous_items = []
+            unmatched_items = []
+
+            for info in pdf_infos:
+                clean_name = Path(info.filename).name
+                candidates = _match_pdf_filename_to_roster(
+                    clean_name,
+                    profiles,
+                )
+
+                if len(candidates) == 1:
+                    matched_items.append(
+                        {
+                            "info": info,
+                            "filename": clean_name,
+                            "profile": candidates[0],
+                        }
+                    )
+                elif len(candidates) > 1:
+                    ambiguous_items.append(
+                        {
+                            "info": info,
+                            "filename": clean_name,
+                            "candidates": candidates,
+                        }
+                    )
+                else:
+                    unmatched_items.append(
+                        {
+                            "info": info,
+                            "filename": clean_name,
+                        }
+                    )
+
+            m1, m2, m3 = st.columns(3)
+            m1.metric("자동 매칭", len(matched_items))
+            m2.metric("확인 필요", len(ambiguous_items))
+            m3.metric("미매칭", len(unmatched_items))
+
+            if matched_items:
+                with st.expander(
+                    f"✅ 자동 매칭 · {len(matched_items)}개",
+                    expanded=False,
+                ):
+                    preview_rows = []
+                    for item in matched_items:
+                        p = item["profile"]
+                        preview_rows.append(
+                            {
+                                "파일명": item["filename"],
+                                "학생": p["학생명"],
+                                "학교": p["학교명"],
+                                "학년": p["학년"],
+                                "반": p["반명"],
+                                "담당선생님": p["담당선생님"],
+                            }
+                        )
+
+                    st.dataframe(
+                        pd.DataFrame(preview_rows),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+
+            manual_matches = []
+
+            if ambiguous_items:
+                with st.expander(
+                    f"⚠️ 동명이인/중복 후보 확인 · {len(ambiguous_items)}개",
+                    expanded=True,
+                ):
+                    st.caption(
+                        "같은 이름의 학생이 여러 명이거나 여러 반 이력이 있으면 "
+                        "정확한 학생을 직접 선택해주세요."
+                    )
+
+                    for idx, item in enumerate(ambiguous_items):
+                        candidates = item["candidates"]
+
+                        def candidate_label(candidate):
+                            return (
+                                f"{candidate['학생명']} · "
+                                f"{candidate['학교명'] or '-'} · "
+                                f"{candidate['학년'] or '-'} · "
+                                f"{candidate['반명'] or '-'} · "
+                                f"{candidate['담당선생님'] or '-'} · "
+                                f"{candidate['재원상태'] or '재원'}"
+                            )
+
+                        selected_index = st.selectbox(
+                            item["filename"],
+                            options=list(range(len(candidates))),
+                            format_func=lambda i, cs=candidates: candidate_label(cs[i]),
+                            key=f"zip_manual_match_{idx}_{item['filename']}",
+                        )
+
+                        manual_matches.append(
+                            {
+                                "info": item["info"],
+                                "filename": item["filename"],
+                                "profile": candidates[selected_index],
+                            }
+                        )
+
+            if unmatched_items:
+                with st.expander(
+                    f"❌ 학생 자동 매칭 실패 · {len(unmatched_items)}개",
+                    expanded=False,
+                ):
+                    st.write(
+                        "파일명에 명단의 학생 이름이 없어서 자동 등록하지 않습니다."
+                    )
+                    st.dataframe(
+                        pd.DataFrame(
+                            {"파일명": [x["filename"] for x in unmatched_items]}
+                        ),
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                    st.caption(
+                        "파일명에 학생 이름을 넣은 뒤 다시 압축해서 업로드하면 자동 매칭됩니다."
+                    )
+
+            upload_items = matched_items + manual_matches
+
+            if not upload_items:
+                st.warning("현재 저장할 수 있는 PDF가 없습니다.")
+                return
+
+            confirm = st.checkbox(
+                f"매칭된 PDF {len(upload_items)}개를 학생별 오답노트로 저장합니다.",
+                key="wrong_note_zip_confirm",
+            )
+
+            if st.button(
+                f"📤 매칭된 {len(upload_items)}개 PDF 전체 저장",
+                type="primary",
+                use_container_width=True,
+                key="wrong_note_zip_save",
+            ):
+                if not confirm:
+                    st.warning("저장 확인 항목에 체크해주세요.")
+                    return
+
+                existing_hashes = set(
+                    row.get("content_sha256")
+                    for row in fetch_all_rows(
+                        "wrong_note_files",
+                        "content_sha256",
+                    )
+                    if row.get("content_sha256")
+                )
+
+                saved = 0
+                duplicates = 0
+                errors = []
+                progress = st.progress(0)
+
+                for idx, item in enumerate(upload_items, start=1):
+                    try:
+                        pdf_bytes = archive.read(item["info"])
+                        digest = hashlib.sha256(pdf_bytes).hexdigest()
+
+                        if digest in existing_hashes:
+                            duplicates += 1
+                            progress.progress(idx / len(upload_items))
+                            continue
+
+                        profile = item["profile"]
+                        now = datetime.now(KST)
+                        storage_path = (
+                            f"{now.strftime('%Y/%m/%d')}/"
+                            f"{_safe_storage_segment(profile['담당선생님'])}/"
+                            f"{_safe_storage_segment(profile['학생명'])}/"
+                            f"{now.strftime('%H%M%S%f')}_{digest[:10]}.pdf"
+                        )
+
+                        upload_wrong_note_pdf_to_storage(
+                            pdf_bytes,
+                            storage_path,
+                        )
+
+                        supabase.table("wrong_note_files").insert(
+                            {
+                                "student_roster_id": (
+                                    int(profile["기록ID"])
+                                    if pd.notna(profile["기록ID"])
+                                    else None
+                                ),
+                                "student_name": str(profile["학생명"]),
+                                "teacher_name": str(profile["담당선생님"]),
+                                "class_name": str(profile["반명"]),
+                                "original_filename": item["filename"],
+                                "storage_path": storage_path,
+                                "content_sha256": digest,
+                                "uploaded_at": now_kst_iso(),
+                                "uploaded_by": (
+                                    st.session_state.teacher_name
+                                    or ALL_TEACHER_ADMIN
+                                ),
+                            }
+                        ).execute()
+
+                        existing_hashes.add(digest)
+                        saved += 1
+
+                    except Exception as error:
+                        errors.append(
+                            f"{item['filename']}: {str(error)[:180]}"
+                        )
+
+                    progress.progress(idx / len(upload_items))
+
+                if saved:
+                    st.success(f"✅ 학생별 오답노트 PDF {saved}개를 저장했습니다.")
+
+                if duplicates:
+                    st.info(
+                        f"이미 업로드된 동일 PDF {duplicates}개는 중복 저장하지 않았습니다."
+                    )
+
+                if errors:
+                    st.warning(
+                        f"업로드 실패 {len(errors)}건이 있습니다."
+                    )
+                    with st.expander("업로드 실패 상세", expanded=False):
+                        for error_text in errors:
+                            st.write("- " + error_text)
+
+    except zipfile.BadZipFile:
+        st.error("정상적인 ZIP 파일이 아닙니다.")
+    except Exception as error:
+        st.error(
+            "ZIP 파일 처리 중 오류가 발생했습니다. "
+            f"{str(error)[:240]}"
+        )
+
+    st.divider()
+    st.markdown("#### 📚 저장된 오답노트 PDF")
+
+    metadata_df = get_wrong_note_pdf_metadata()
+
+    if metadata_df.empty:
+        st.info("아직 저장된 학생 오답노트 PDF가 없습니다.")
+    else:
+        st.metric("저장된 PDF", len(metadata_df))
+        st.dataframe(
+            metadata_df[
+                [
+                    "학생", "담당선생님", "반",
+                    "파일명", "업로드일시", "업로더",
+                ]
+            ],
+            use_container_width=True,
+            hide_index=True,
+            height=420,
+        )
+
+
+
 # ---------------------- 선생님 관리 화면 ----------------------
 def show_admin():
     if not st.session_state.is_admin:
@@ -11501,15 +11949,29 @@ def show_admin():
             "'오답 관리 → 홈'에서 확인할 수 있습니다."
         )
 
-        (
-            tab_paper,
-            tab_print,
-        ) = st.tabs(
-            [
-                "🧾 오답노트 만들기",
-                "🖨️ 출력 관리",
-            ]
-        )
+        if st.session_state.teacher_name == ALL_TEACHER_ADMIN:
+            (
+                tab_paper,
+                tab_print,
+                tab_pdf_upload,
+            ) = st.tabs(
+                [
+                    "🧾 오답노트 만들기",
+                    "🖨️ 출력 관리",
+                    "📦 PDF 일괄 업로드",
+                ]
+            )
+        else:
+            (
+                tab_paper,
+                tab_print,
+            ) = st.tabs(
+                [
+                    "🧾 오답노트 만들기",
+                    "🖨️ 출력 관리",
+                ]
+            )
+            tab_pdf_upload = None
 
     with tab_student_detail:
         render_student_detail_view()
@@ -11652,6 +12114,10 @@ def show_admin():
                             tab_name,
                             tab_index
                         )
+
+    if tab_pdf_upload is not None:
+        with tab_pdf_upload:
+            render_wrong_note_zip_uploader()
 
     with tab_paper:
         roster = get_roster_df()
