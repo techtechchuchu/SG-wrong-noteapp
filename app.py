@@ -11434,15 +11434,16 @@ def get_wrong_note_pdf_metadata() -> pd.DataFrame:
         "wrong_note_files",
         (
             "id,student_roster_id,student_name,teacher_name,class_name,"
-            "original_filename,storage_path,content_sha256,uploaded_at,uploaded_by"
+            "original_filename,storage_path,content_sha256,uploaded_at,uploaded_by,"
+            "round_number,source_school,subject_name"
         ),
         order_column="uploaded_at",
         desc=True,
     )
 
     columns = [
-        "ID", "학생", "담당선생님", "반", "파일명",
-        "저장경로", "업로드일시", "업로더",
+        "ID", "학생", "담당선생님", "반", "회차", "출처학교", "과목",
+        "파일명", "저장경로", "업로드일시", "업로더",
     ]
 
     if not rows:
@@ -11455,6 +11456,9 @@ def get_wrong_note_pdf_metadata() -> pd.DataFrame:
                 "학생": row.get("student_name", ""),
                 "담당선생님": row.get("teacher_name", ""),
                 "반": row.get("class_name", ""),
+                "회차": row.get("round_number"),
+                "출처학교": row.get("source_school", ""),
+                "과목": row.get("subject_name", ""),
                 "파일명": row.get("original_filename", ""),
                 "저장경로": row.get("storage_path", ""),
                 "업로드일시": row.get("uploaded_at", ""),
@@ -11522,6 +11526,33 @@ def _match_pdf_filename_to_roster(
     return exact_candidates.to_dict("records")
 
 
+def parse_wrong_note_filename_metadata(filename: str) -> dict:
+    """[13회오답][성광여고][강민수][공통수학2].pdf 형식에서 메타데이터를 읽습니다."""
+    stem = Path(filename).stem
+    parts = re.findall(r"\[([^\]]+)\]", stem)
+
+    result = {
+        "round_number": None,
+        "source_school": "",
+        "student_label": "",
+        "subject_name": "",
+    }
+
+    if parts:
+        round_match = re.search(r"(\d+)\s*회", parts[0])
+        if round_match:
+            result["round_number"] = int(round_match.group(1))
+
+        if len(parts) >= 2:
+            result["source_school"] = parts[1].strip()
+        if len(parts) >= 3:
+            result["student_label"] = parts[2].strip()
+        if len(parts) >= 4:
+            result["subject_name"] = parts[3].strip()
+
+    return result
+
+
 def render_wrong_note_zip_uploader():
     """전체 관리자가 ZIP 안의 학생별 오답노트 PDF를 일괄 등록합니다."""
     st.markdown("### 📦 오답노트 PDF 일괄 업로드")
@@ -11580,6 +11611,7 @@ def render_wrong_note_zip_uploader():
 
             for info in pdf_infos:
                 clean_name = Path(info.filename).name
+                filename_meta = parse_wrong_note_filename_metadata(clean_name)
                 candidates = _match_pdf_filename_to_roster(
                     clean_name,
                     profiles,
@@ -11591,6 +11623,7 @@ def render_wrong_note_zip_uploader():
                             "info": info,
                             "filename": clean_name,
                             "profile": candidates[0],
+                            "meta": filename_meta,
                         }
                     )
                 elif len(candidates) > 1:
@@ -11599,6 +11632,7 @@ def render_wrong_note_zip_uploader():
                             "info": info,
                             "filename": clean_name,
                             "candidates": candidates,
+                            "meta": filename_meta,
                         }
                     )
                 else:
@@ -11606,6 +11640,7 @@ def render_wrong_note_zip_uploader():
                         {
                             "info": info,
                             "filename": clean_name,
+                            "meta": filename_meta,
                         }
                     )
 
@@ -11625,6 +11660,11 @@ def render_wrong_note_zip_uploader():
                         preview_rows.append(
                             {
                                 "파일명": item["filename"],
+                                "회차": (
+                                    f"{item['meta'].get('round_number')}회"
+                                    if item["meta"].get("round_number") is not None
+                                    else "-"
+                                ),
                                 "학생": p["학생명"],
                                 "학교": p["학교명"],
                                 "학년": p["학년"],
@@ -11676,6 +11716,7 @@ def render_wrong_note_zip_uploader():
                                 "info": item["info"],
                                 "filename": item["filename"],
                                 "profile": candidates[selected_index],
+                                "meta": item.get("meta", {}),
                             }
                         )
 
@@ -11770,6 +11811,9 @@ def render_wrong_note_zip_uploader():
                                 "original_filename": item["filename"],
                                 "storage_path": storage_path,
                                 "content_sha256": digest,
+                                "round_number": item.get("meta", {}).get("round_number"),
+                                "source_school": item.get("meta", {}).get("source_school", ""),
+                                "subject_name": item.get("meta", {}).get("subject_name", ""),
                                 "uploaded_at": now_kst_iso(),
                                 "uploaded_by": (
                                     st.session_state.teacher_name
@@ -11821,10 +11865,36 @@ def render_wrong_note_zip_uploader():
         st.info("아직 저장된 학생 오답노트 PDF가 없습니다.")
     else:
         st.metric("저장된 PDF", len(metadata_df))
+
+        round_df = metadata_df[metadata_df["회차"].notna()].copy()
+        if not round_df.empty:
+            round_df["회차"] = pd.to_numeric(round_df["회차"], errors="coerce")
+            latest_round = int(round_df["회차"].max())
+            round_counts = (
+                round_df.groupby("회차")["학생"]
+                .nunique()
+                .reset_index(name="학생수")
+                .sort_values("회차", ascending=False)
+            )
+
+            st.markdown("#### 🔢 회차별 업로드 현황")
+            st.caption(
+                f"현재 확인되는 최신 회차는 **{latest_round}회**입니다. "
+                "파일명에 '[13회오답]'처럼 회차가 들어가면 자동 기록됩니다."
+            )
+
+            with st.expander("회차별 기록 보기", expanded=False):
+                round_counts["회차"] = round_counts["회차"].astype(int).astype(str) + "회"
+                st.dataframe(
+                    round_counts,
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
         st.dataframe(
             metadata_df[
                 [
-                    "학생", "담당선생님", "반",
+                    "학생", "담당선생님", "반", "회차", "출처학교", "과목",
                     "파일명", "업로드일시", "업로더",
                 ]
             ],
