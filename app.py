@@ -10700,24 +10700,30 @@ def build_next_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.Data
 
 
 
-def get_recent_wednesday_start(reference_date=None) -> datetime:
-    """기준일에서 가장 최근 수요일 00:00을 반환합니다."""
+def get_weekly_missing_window(reference_date=None) -> tuple[datetime, datetime]:
+    """지난주 수요일 00:00 ~ 이번주 수요일 00:00(미포함) 구간을 반환합니다.
+
+    화면 기준으로는 '지난주 수요일 ~ 이번주 화요일' 전체 기간입니다.
+    """
     if reference_date is None:
         reference_date = datetime.now(KST).date()
     elif isinstance(reference_date, datetime):
         reference_date = reference_date.date()
 
-    days_since_wednesday = (reference_date.weekday() - 2) % 7
-    recent_wednesday = reference_date - timedelta(days=days_since_wednesday)
-
-    return datetime.combine(
-        recent_wednesday,
+    this_monday = reference_date - timedelta(days=reference_date.weekday())
+    start_at = datetime.combine(
+        this_monday - timedelta(days=5),
         datetime.min.time(),
     )
+    end_exclusive = datetime.combine(
+        this_monday + timedelta(days=2),
+        datetime.min.time(),
+    )
+    return start_at, end_exclusive
 
 
 def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
-    """가장 최근 수요일 00:00 이후 아직 오답을 작성하지 않은 재원생을 찾습니다."""
+    """지난주 수요일~이번주 화요일 동안 오답을 작성하지 않은 재원생을 찾습니다."""
     roster = get_roster_df()
     wrong_df = get_all_wrong_answers()
 
@@ -10728,14 +10734,18 @@ def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
         "학교",
         "학년",
         "최근제출",
-        "미작성기준",
+        "미작성기간",
         "상태",
     ]
 
     if roster.empty:
         return pd.DataFrame(columns=columns)
 
-    reference_start = get_recent_wednesday_start()
+    window_start, window_end = get_weekly_missing_window()
+    window_label = (
+        f"{window_start.strftime('%m/%d')} ~ "
+        f"{(window_end - timedelta(days=1)).strftime('%m/%d')}"
+    )
 
     if wrong_df.empty:
         wrong_working = pd.DataFrame(
@@ -10782,14 +10792,17 @@ def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
 
         if student_answers.empty:
             latest_dt = pd.NaT
-            has_since_start = False
+            has_in_window = False
         else:
             latest_dt = student_answers["_dt"].max()
-            has_since_start = bool(
-                (student_answers["_dt"] >= reference_start).any()
+            has_in_window = bool(
+                (
+                    (student_answers["_dt"] >= window_start)
+                    & (student_answers["_dt"] < window_end)
+                ).any()
             )
 
-        if has_since_start:
+        if has_in_window:
             continue
 
         rows.append(
@@ -10802,8 +10815,8 @@ def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
                 "학교": str(roster_row.get("학교명", "") or "").strip(),
                 "학년": str(roster_row.get("학년", "") or "").strip(),
                 "최근제출": latest_dt,
-                "미작성기준": reference_start,
-                "상태": "수요일 이후 미작성",
+                "미작성기간": window_label,
+                "상태": "주간 미작성",
             }
         )
 
@@ -10870,7 +10883,7 @@ def render_report_delivery_management(parsed_reports: list[dict]):
     m1, m2, m3 = st.columns(3)
     m1.metric("📦 이번 배부 대상", report_students)
     m2.metric("🟠 다음 전달 대상", next_students)
-    m3.metric("⚪ 수요일 이후 미작성", missing_students)
+    m3.metric("⚪ 주간 미작성", missing_students)
 
     with st.expander(
         f"📦 최신 보고서 배부 대상 · {report_students}명",
@@ -10951,11 +10964,11 @@ def render_report_delivery_management(parsed_reports: list[dict]):
             )
 
     with st.expander(
-        f"⚪ 수요일 이후 미작성 학생 · {missing_students}명",
+        f"⚪ 주간 미작성 학생 · {missing_students}명",
         expanded=False,
     ):
         st.caption(
-            "가장 최근 수요일 00:00 이후 아직 새로운 오답을 작성하지 않은 재원생입니다."
+            "지난주 수요일 00:00부터 이번주 화요일 23:59까지 오답을 한 번도 작성하지 않은 재원생입니다."
         )
 
         if missing_df.empty:
@@ -10971,10 +10984,6 @@ def render_report_delivery_management(parsed_reports: list[dict]):
                 .fillna("-")
                 .replace("NaT", "-")
             )
-            missing_display["미작성기준"] = pd.to_datetime(
-                missing_display["미작성기준"],
-                errors="coerce",
-            ).dt.strftime("%m/%d %H:%M")
 
             st.dataframe(
                 missing_display[
@@ -10985,7 +10994,7 @@ def render_report_delivery_management(parsed_reports: list[dict]):
                         "학교",
                         "학년",
                         "최근제출",
-                        "미작성기준",
+                        "미작성기간",
                     ]
                 ],
                 use_container_width=True,
