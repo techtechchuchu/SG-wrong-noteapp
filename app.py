@@ -10700,30 +10700,22 @@ def build_next_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.Data
 
 
 
-def get_weekly_missing_window(reference_date=None) -> tuple[datetime, datetime]:
-    """지난주 수요일 00:00 ~ 이번주 수요일 00:00(미포함) 구간을 반환합니다.
+def get_current_missing_window() -> tuple[datetime, datetime]:
+    """가장 최근 수요일 00:00부터 현재 시각까지의 구간을 반환합니다."""
+    now = datetime.now(KST).replace(tzinfo=None)
+    today = now.date()
+    days_since_wednesday = (today.weekday() - 2) % 7
+    recent_wednesday = today - timedelta(days=days_since_wednesday)
 
-    화면 기준으로는 '지난주 수요일 ~ 이번주 화요일' 전체 기간입니다.
-    """
-    if reference_date is None:
-        reference_date = datetime.now(KST).date()
-    elif isinstance(reference_date, datetime):
-        reference_date = reference_date.date()
-
-    this_monday = reference_date - timedelta(days=reference_date.weekday())
     start_at = datetime.combine(
-        this_monday - timedelta(days=5),
+        recent_wednesday,
         datetime.min.time(),
     )
-    end_exclusive = datetime.combine(
-        this_monday + timedelta(days=2),
-        datetime.min.time(),
-    )
-    return start_at, end_exclusive
+    return start_at, now
 
 
 def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
-    """지난주 수요일~이번주 화요일 동안 오답을 작성하지 않은 재원생을 찾습니다."""
+    """가장 최근 수요일 00:00부터 현재까지 오답을 작성하지 않은 재원생을 찾습니다."""
     roster = get_roster_df()
     wrong_df = get_all_wrong_answers()
 
@@ -10741,10 +10733,10 @@ def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
     if roster.empty:
         return pd.DataFrame(columns=columns)
 
-    window_start, window_end = get_weekly_missing_window()
+    window_start, window_end = get_current_missing_window()
     window_label = (
-        f"{window_start.strftime('%m/%d')} ~ "
-        f"{(window_end - timedelta(days=1)).strftime('%m/%d')}"
+        f"{window_start.strftime('%m/%d %H:%M')} ~ "
+        f"{window_end.strftime('%m/%d %H:%M')}"
     )
 
     if wrong_df.empty:
@@ -10798,7 +10790,7 @@ def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
             has_in_window = bool(
                 (
                     (student_answers["_dt"] >= window_start)
-                    & (student_answers["_dt"] < window_end)
+                    & (student_answers["_dt"] <= window_end)
                 ).any()
             )
 
@@ -10816,7 +10808,7 @@ def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
                 "학년": str(roster_row.get("학년", "") or "").strip(),
                 "최근제출": latest_dt,
                 "미작성기간": window_label,
-                "상태": "주간 미작성",
+                "상태": "수요일 이후 현재까지 미작성",
             }
         )
 
@@ -10883,7 +10875,7 @@ def render_report_delivery_management(parsed_reports: list[dict]):
     m1, m2, m3 = st.columns(3)
     m1.metric("📦 이번 배부 대상", report_students)
     m2.metric("🟠 다음 전달 대상", next_students)
-    m3.metric("⚪ 주간 미작성", missing_students)
+    m3.metric("⚪ 수요일 이후 미작성", missing_students)
 
     with st.expander(
         f"📦 최신 보고서 배부 대상 · {report_students}명",
@@ -10964,11 +10956,11 @@ def render_report_delivery_management(parsed_reports: list[dict]):
             )
 
     with st.expander(
-        f"⚪ 주간 미작성 학생 · {missing_students}명",
+        f"⚪ 수요일 이후 미작성 학생 · {missing_students}명",
         expanded=False,
     ):
         st.caption(
-            "지난주 수요일 00:00부터 이번주 화요일 23:59까지 오답을 한 번도 작성하지 않은 재원생입니다."
+            "가장 최근 수요일 00:00부터 현재 시각까지 오답을 한 번도 작성하지 않은 재원생입니다. 학생이 오답을 제출하면 새로고침 시 즉시 목록에서 제외됩니다."
         )
 
         if missing_df.empty:
