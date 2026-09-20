@@ -9725,7 +9725,10 @@ def show_role_select():
 
 
 def is_park_byungmin_student(username: str) -> bool:
-    """현재 재원 명단 기준 박병민.T 담당 학생인지 확인합니다."""
+    """현재 재원 명단 기준 박병민.T만 담당하는 학생인지 확인합니다.
+
+    박병민.T와 다른 선생님이 함께 담당하는 학생은 점검 대상에서 제외합니다.
+    """
     student_name = str(username or "").strip()
     if not student_name:
         return False
@@ -9741,12 +9744,13 @@ def is_park_byungmin_student(username: str) -> bool:
     if matched.empty:
         return False
 
-    return bool(
-        matched["담당선생님"]
-        .apply(normalize_teacher_name)
-        .eq("박병민.T")
-        .any()
-    )
+    teacher_set = {
+        normalize_teacher_name(value)
+        for value in matched["담당선생님"].dropna().astype(str).tolist()
+        if normalize_teacher_name(value)
+    }
+
+    return teacher_set == {"박병민.T"}
 
 
 # ---------------------- 학생 화면 ----------------------
