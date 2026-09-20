@@ -10700,8 +10700,24 @@ def build_next_delivery_rows_from_reports(parsed_reports: list[dict]) -> pd.Data
 
 
 
+def get_recent_wednesday_start(reference_date=None) -> datetime:
+    """기준일에서 가장 최근 수요일 00:00을 반환합니다."""
+    if reference_date is None:
+        reference_date = datetime.now(KST).date()
+    elif isinstance(reference_date, datetime):
+        reference_date = reference_date.date()
+
+    days_since_wednesday = (reference_date.weekday() - 2) % 7
+    recent_wednesday = reference_date - timedelta(days=days_since_wednesday)
+
+    return datetime.combine(
+        recent_wednesday,
+        datetime.min.time(),
+    )
+
+
 def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
-    """최신 보고서 마감 이후 아직 새 오답을 작성하지 않은 재원생을 찾습니다."""
+    """가장 최근 수요일 00:00 이후 아직 오답을 작성하지 않은 재원생을 찾습니다."""
     roster = get_roster_df()
     wrong_df = get_all_wrong_answers()
 
@@ -10712,12 +10728,14 @@ def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
         "학교",
         "학년",
         "최근제출",
-        "기준마감",
+        "미작성기준",
         "상태",
     ]
 
     if roster.empty:
         return pd.DataFrame(columns=columns)
+
+    reference_start = get_recent_wednesday_start()
 
     if wrong_df.empty:
         wrong_working = pd.DataFrame(
@@ -10733,64 +10751,61 @@ def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
             wrong_working["_dt"].notna()
         ].copy()
 
+    teacher_names = {
+        normalize_teacher_name(report.get("teacher", ""))
+        for report in parsed_reports
+        if report.get("ok") and report.get("teacher")
+    }
+
+    if not teacher_names:
+        return pd.DataFrame(columns=columns)
+
+    scoped_roster = roster[
+        roster["담당선생님"].apply(normalize_teacher_name).isin(teacher_names)
+    ].copy()
+
     rows = []
 
-    for report in parsed_reports:
-        if not report.get("ok"):
-            continue
+    for _, roster_row in scoped_roster.iterrows():
+        student_name = str(
+            roster_row.get("학생명", "") or ""
+        ).strip()
 
-        teacher = normalize_teacher_name(report.get("teacher", ""))
-        cutoff_at = report.get("cutoff_at")
+        student_answers = (
+            wrong_working[
+                wrong_working["학생"].astype(str).str.strip()
+                == student_name
+            ].copy()
+            if not wrong_working.empty
+            else pd.DataFrame()
+        )
 
-        if not teacher or cutoff_at is None:
-            continue
-
-        teacher_roster = roster[
-            roster["담당선생님"].apply(normalize_teacher_name)
-            == teacher
-        ].copy()
-
-        if teacher_roster.empty:
-            continue
-
-        for _, roster_row in teacher_roster.iterrows():
-            student_name = str(
-                roster_row.get("학생명", "") or ""
-            ).strip()
-
-            student_answers = (
-                wrong_working[
-                    wrong_working["학생"].astype(str).str.strip()
-                    == student_name
-                ].copy()
-                if not wrong_working.empty
-                else pd.DataFrame()
+        if student_answers.empty:
+            latest_dt = pd.NaT
+            has_since_start = False
+        else:
+            latest_dt = student_answers["_dt"].max()
+            has_since_start = bool(
+                (student_answers["_dt"] >= reference_start).any()
             )
 
-            if student_answers.empty:
-                latest_dt = pd.NaT
-                has_after_cutoff = False
-            else:
-                latest_dt = student_answers["_dt"].max()
-                has_after_cutoff = bool(
-                    (student_answers["_dt"] > cutoff_at).any()
-                )
+        if has_since_start:
+            continue
 
-            if has_after_cutoff:
-                continue
-
-            rows.append(
-                {
-                    "담당선생님": teacher,
-                    "반": str(roster_row.get("반명", "") or "").strip(),
-                    "학생": student_name,
-                    "학교": str(roster_row.get("학교명", "") or "").strip(),
-                    "학년": str(roster_row.get("학년", "") or "").strip(),
-                    "최근제출": latest_dt,
-                    "기준마감": cutoff_at,
-                    "상태": "마감 이후 미작성",
-                }
-            )
+        rows.append(
+            {
+                "담당선생님": normalize_teacher_name(
+                    roster_row.get("담당선생님", "")
+                ),
+                "반": str(roster_row.get("반명", "") or "").strip(),
+                "학생": student_name,
+                "학교": str(roster_row.get("학교명", "") or "").strip(),
+                "학년": str(roster_row.get("학년", "") or "").strip(),
+                "최근제출": latest_dt,
+                "미작성기준": reference_start,
+                "상태": "수요일 이후 미작성",
+            }
+        )
 
     result_df = pd.DataFrame(rows, columns=columns)
 
@@ -10855,7 +10870,7 @@ def render_report_delivery_management(parsed_reports: list[dict]):
     m1, m2, m3 = st.columns(3)
     m1.metric("📦 이번 배부 대상", report_students)
     m2.metric("🟠 다음 전달 대상", next_students)
-    m3.metric("⚪ 마감 이후 미작성", missing_students)
+    m3.metric("⚪ 수요일 이후 미작성", missing_students)
 
     with st.expander(
         f"📦 최신 보고서 배부 대상 · {report_students}명",
@@ -10936,11 +10951,11 @@ def render_report_delivery_management(parsed_reports: list[dict]):
             )
 
     with st.expander(
-        f"⚪ 마감 이후 미작성 학생 · {missing_students}명",
+        f"⚪ 수요일 이후 미작성 학생 · {missing_students}명",
         expanded=False,
     ):
         st.caption(
-            "최신 보고서의 제출 마감 이후 아직 새로운 오답을 작성하지 않은 재원생입니다."
+            "가장 최근 수요일 00:00 이후 아직 새로운 오답을 작성하지 않은 재원생입니다."
         )
 
         if missing_df.empty:
@@ -10956,8 +10971,8 @@ def render_report_delivery_management(parsed_reports: list[dict]):
                 .fillna("-")
                 .replace("NaT", "-")
             )
-            missing_display["기준마감"] = pd.to_datetime(
-                missing_display["기준마감"],
+            missing_display["미작성기준"] = pd.to_datetime(
+                missing_display["미작성기준"],
                 errors="coerce",
             ).dt.strftime("%m/%d %H:%M")
 
@@ -10970,7 +10985,7 @@ def render_report_delivery_management(parsed_reports: list[dict]):
                         "학교",
                         "학년",
                         "최근제출",
-                        "기준마감",
+                        "미작성기준",
                     ]
                 ],
                 use_container_width=True,
