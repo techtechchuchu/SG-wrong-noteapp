@@ -9773,18 +9773,12 @@ def show_student():
                 login_name = username.strip()
 
                 if check_user(login_name, password):
-                    if is_park_byungmin_student(login_name):
-                        st.warning(
-                            "🚧 박병민.T 담당 학생은 현재 점검 중이기에 "
-                            "원활한 이용이 불가능합니다."
-                        )
-                    else:
-                        st.session_state.student_user = login_name
-                        set_persistent_session(
-                            "student",
-                            student_user=login_name,
-                        )
-                        st.rerun()
+                    st.session_state.student_user = login_name
+                    set_persistent_session(
+                        "student",
+                        student_user=login_name,
+                    )
+                    st.rerun()
                 else:
                     st.error("학생 또는 비밀번호가 올바르지 않습니다.")
 
