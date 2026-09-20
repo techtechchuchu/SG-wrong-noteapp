@@ -11403,30 +11403,46 @@ def upload_wrong_note_pdf_to_storage(
     pdf_bytes: bytes,
     storage_path: str,
 ):
-    """Supabase Storage private bucket에 PDF를 업로드합니다."""
-    encoded_path = "/".join(
-        urllib.parse.quote(segment, safe="")
-        for segment in storage_path.split("/")
-    )
-    url = (
-        f"{SUPABASE_URL}/storage/v1/object/"
-        f"{WRONG_NOTE_STORAGE_BUCKET}/{encoded_path}"
-    )
+    """Supabase Storage private bucket에 PDF를 업로드합니다.
 
-    request = urllib.request.Request(
-        url,
-        data=pdf_bytes,
-        headers={
-            "Authorization": f"Bearer {SUPABASE_KEY}",
-            "apikey": SUPABASE_KEY,
-            "Content-Type": "application/pdf",
-            "x-upsert": "true",
-        },
-        method="POST",
-    )
+    수동 HTTP 요청 대신 Supabase SDK를 사용해 Storage API 형식 차이로 인한
+    400 Bad Request를 피합니다.
+    """
+    if not pdf_bytes:
+        raise ValueError("PDF 파일 내용이 비어 있습니다.")
 
-    with urllib.request.urlopen(request, timeout=60) as response:
-        return response.read().decode("utf-8")
+    try:
+        bucket = supabase.storage.from_(WRONG_NOTE_STORAGE_BUCKET)
+        return bucket.upload(
+            storage_path,
+            pdf_bytes,
+            {
+                "content-type": "application/pdf",
+                "upsert": "true",
+            },
+        )
+    except Exception as error:
+        error_text = str(error)
+
+        # 이미 같은 경로가 존재하는 경우에는 overwrite를 한 번 시도합니다.
+        if "already exists" in error_text.lower() or "duplicate" in error_text.lower():
+            try:
+                return bucket.update(
+                    storage_path,
+                    pdf_bytes,
+                    {
+                        "content-type": "application/pdf",
+                        "upsert": "true",
+                    },
+                )
+            except Exception as update_error:
+                raise RuntimeError(
+                    f"Supabase Storage 덮어쓰기 실패: {update_error}"
+                ) from update_error
+
+        raise RuntimeError(
+            f"Supabase Storage 업로드 실패: {error_text}"
+        ) from error
 
 
 def get_wrong_note_pdf_metadata() -> pd.DataFrame:
@@ -11827,7 +11843,7 @@ def render_wrong_note_zip_uploader():
 
                     except Exception as error:
                         errors.append(
-                            f"{item['filename']}: {str(error)[:180]}"
+                            f"{item['filename']}: {str(error)[:500]}"
                         )
 
                     progress.progress(idx / len(upload_items))
