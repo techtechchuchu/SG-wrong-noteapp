@@ -10865,10 +10865,70 @@ def build_missing_after_cutoff_rows(parsed_reports: list[dict]) -> pd.DataFrame:
 
 
 
+def build_submitted_after_wednesday_rows() -> pd.DataFrame:
+    """보고서 저장 여부와 관계없이 최근 수요일 이후 제출한 학생을 찾습니다."""
+    roster = get_roster_df()
+    wrong_df = get_all_wrong_answers()
+    columns = ["담당선생님", "반", "학생", "교재", "문항수", "첫제출", "최근제출"]
+    if roster.empty or wrong_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    window_start, window_end = get_current_missing_window()
+    working = wrong_df.copy()
+    working["_dt"] = pd.to_datetime(working["작성일시"], errors="coerce")
+    working = working[
+        working["_dt"].notna()
+        & (working["_dt"] >= window_start)
+        & (working["_dt"] <= window_end)
+    ].copy()
+    if working.empty:
+        return pd.DataFrame(columns=columns)
+
+    working["_문항수"] = working["문제번호"].apply(
+        lambda value: len(parse_problem_numbers(value))
+    )
+    roster_rows = []
+    for _, roster_row in roster.iterrows():
+        student = str(roster_row.get("학생명", "") or "").strip()
+        if not student:
+            continue
+        for book in split_roster_books(roster_row.get("매칭교재", "")):
+            roster_rows.append(
+                {
+                    "학생": student,
+                    "교재": book,
+                    "담당선생님": normalize_teacher_name(roster_row.get("담당선생님", "")),
+                    "반": str(roster_row.get("반명", "") or "").strip(),
+                }
+            )
+    roster_lookup = pd.DataFrame(roster_rows).drop_duplicates()
+    if roster_lookup.empty:
+        return pd.DataFrame(columns=columns)
+
+    working["학생"] = working["학생"].astype(str).str.strip()
+    working["교재"] = working["교재"].astype(str).str.strip()
+    matched = working.merge(roster_lookup, on=["학생", "교재"], how="inner")
+    if matched.empty:
+        return pd.DataFrame(columns=columns)
+
+    result = (
+        matched.groupby(["담당선생님", "반", "학생"], sort=False)
+        .agg(
+            교재=("교재", lambda values: ", ".join(dict.fromkeys(values))),
+            문항수=("_문항수", "sum"),
+            첫제출=("_dt", "min"),
+            최근제출=("_dt", "max"),
+        )
+        .reset_index()
+    )
+    return result[columns].sort_values(["담당선생님", "반", "학생"]).reset_index(drop=True)
+
+
 def render_report_delivery_management(parsed_reports: list[dict]):
     """최신 보고서 기준 배부/다음 전달/미작성 목록을 접힌 목록으로 보여줍니다."""
     report_df = build_delivered_rows_from_reports(parsed_reports)
     next_df = build_next_delivery_rows_from_reports(parsed_reports)
+    submitted_df = build_submitted_after_wednesday_rows()
     missing_df = build_missing_after_cutoff_rows(parsed_reports)
 
     st.markdown(
@@ -10983,6 +11043,32 @@ def render_report_delivery_management(parsed_reports: list[dict]):
                         "추천전달일",
                     ]
                 ],
+                use_container_width=True,
+                hide_index=True,
+                height=420,
+            )
+
+    submitted_students = (
+        submitted_df["학생"].nunique() if not submitted_df.empty else 0
+    )
+    with st.expander(
+        f"🟢 수요일 이후 작성 학생 · {submitted_students}명",
+        expanded=False,
+    ):
+        st.caption(
+            "최신 보고서가 아직 저장되지 않았더라도, 지난 수요일 이후 실제로 "
+            "오답을 작성한 학생을 전체 명단에서 표시합니다."
+        )
+        if submitted_df.empty:
+            st.info("지난 수요일 이후 작성한 학생이 없습니다.")
+        else:
+            submitted_display = submitted_df.copy()
+            for column in ["첫제출", "최근제출"]:
+                submitted_display[column] = pd.to_datetime(
+                    submitted_display[column], errors="coerce"
+                ).dt.strftime("%m/%d %H:%M")
+            st.dataframe(
+                submitted_display,
                 use_container_width=True,
                 hide_index=True,
                 height=420,
