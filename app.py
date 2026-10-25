@@ -11,7 +11,7 @@ import urllib.parse
 import time
 import zipfile
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 from pathlib import Path
 
@@ -9670,6 +9670,46 @@ if st.session_state.role is None and SESSION_SECRET:
 
 
 # ---------------------- 시작 화면 ----------------------
+RENEWED_SITE_URL = "https://studygyeol.vercel.app/"
+LEGACY_SITE_LAST_DAY = date(2026, 10, 31)
+
+
+def show_site_move_notice(compact: bool = False):
+    """기존 사이트와 리뉴얼 사이트의 전환 일정을 안내합니다."""
+    if compact:
+        st.info(
+            "SG 오답노트가 이전합니다. 기존 로그인과 학습 기록은 새 사이트에서도 그대로 이용할 수 있습니다. "
+            "기존 주소는 2026년 10월 31일까지 이용 가능하며, 11월 1일부터 종료됩니다."
+        )
+        st.link_button("✨ 리뉴얼 사이트 들어가기", RENEWED_SITE_URL)
+        return
+    st.title("SG 오답노트가 새 사이트로 이전합니다")
+    st.write(
+        "기존 아이디와 비밀번호로 동일하게 로그인할 수 있으며, "
+        "학습 기록도 그대로 이용할 수 있습니다. "
+        "새 사이트에서는 더욱 원활한 서버 환경에서 서비스를 이용하실 수 있습니다."
+    )
+    st.info(
+        "기존 사이트는 2026년 10월 31일까지 이용 가능하며, "
+        "11월 1일부터는 기존 주소의 서비스가 종료됩니다."
+    )
+
+
+def show_site_move_gateway(legacy_open: bool):
+    show_banner()
+    show_site_move_notice()
+    if legacy_open:
+        new_site_col, old_site_col = st.columns(2, gap="medium")
+        with new_site_col:
+            st.link_button("✨ 리뉴얼 사이트 들어가기", RENEWED_SITE_URL, use_container_width=True)
+        with old_site_col:
+            if st.button("기존 사이트 들어가기", use_container_width=True, key="enter_legacy_site"):
+                st.session_state.legacy_access_chosen = True
+                st.rerun()
+    else:
+        st.link_button("✨ 리뉴얼 사이트 들어가기", RENEWED_SITE_URL, use_container_width=True)
+
+
 def show_role_select():
     show_banner()
     show_account_notice()
@@ -13019,15 +13059,24 @@ def show_superadmin():
 
 
 # ---------------------- 라우팅 ----------------------
-if st.session_state.role is None:
+legacy_open = datetime.now(ZoneInfo("Asia/Seoul")).date() <= LEGACY_SITE_LAST_DAY
+if not legacy_open:
+    show_site_move_gateway(False)
+elif st.session_state.role is None and not st.session_state.get("legacy_access_chosen", False):
+    show_site_move_gateway(True)
+elif st.session_state.role is None:
     show_role_select()
 elif st.session_state.role == "student":
+    show_site_move_notice(compact=True)
     show_student()
 elif st.session_state.role == "admin":
+    show_site_move_notice(compact=True)
     show_admin()
 
 elif st.session_state.role == "superadmin":
+    show_site_move_notice(compact=True)
     show_superadmin()
 
 # 모든 화면에 하단 고정 안내 표시
 show_global_footer()
+
